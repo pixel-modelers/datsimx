@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "datsimx"
+version = "0.1"
+dependencies = [
+    "h5py",
+    "numpy",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["datsimx*"]
+
+[tool.setuptools.package-data]
+datsimx = ["*.stol", "*.pdb", "*.lam"]
+
+[project.scripts]
+"datsimx.sim" = "datsimx.mx_simulate:main"
+
