@@ -267,7 +267,7 @@ def main():
         E.detector = DETECTOR
         E.beam = BEAM
         El.append(E)
-        geom_file = os.path.join(args.outdir, "geom.expt")
+        geom_file = os.path.join(args.outdir, f"geom_run{args.run}.expt")
         El.as_file(geom_file)
         make_nexus.make_nexus(args.outdir, args.run, total_deg=args.totalDeg)
         

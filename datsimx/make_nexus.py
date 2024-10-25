@@ -10,7 +10,7 @@ import numpy as np
 
 def make_nexus(folder, run, total_deg=180):
     """
-    folder is a sim_laue_basic.py output folder, 
+    folder is a datsimx.sim output folder, 
     and run is an integer run number (args.run argument to sim_laue_basic)
     Finds all files shot_{run}_#####.h5 in {folder} and combines them into a master nexus file
     """
@@ -27,7 +27,7 @@ def make_nexus(folder, run, total_deg=180):
 
     phi = np.arange(len(fnames))*delta_phi 
 
-    geom_file = os.path.join(folder, "geom.expt")
+    geom_file = os.path.join(folder, f"geom_run{run}.expt")
     El = ExperimentList.from_file(geom_file, False)
     Detector = El[0].detector
     xdim, ydim = Detector[0].get_image_size()
@@ -135,4 +135,5 @@ def make_nexus(folder, run, total_deg=180):
 if __name__=="__main__":
     folder = sys.argv[1]
     run = int(sys.argv[2])
-    make_nexus(folder, run)
+    total_deg = float(sys.argv[3])
+    make_nexus(folder, run, total_deg)
