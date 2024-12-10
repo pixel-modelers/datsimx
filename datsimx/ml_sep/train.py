@@ -82,16 +82,19 @@ from datsimx.ml_sep.networks.swin_transformer_unet_skip_expand_decoder_sys impor
 from math import ceil
 dim=832
 #ws = ceil(7*(dim)/224)
-ws = 26
-model = SwinTransformerSys(img_size=dim, 
-                           num_classes=2, 
-                           window_size=ws, 
-                           in_chans=1)
-from resonet.params import res50
+#ws = 26
+#model = SwinTransformerSys(img_size=dim, 
+#                           num_classes=2, 
+#                           window_size=ws, 
+#                           in_chans=1)
+#from resonet.params import res50
+#model = res50()
+
+from datsimx.ml_sep.arch import predictMulti
+model = predictMulti()
 
 #model = unet_model.UNet(1,2)
 sig = torch.nn.Sigmoid()
-model = res50()
 model = torch.nn.Sequential(model, sig)
 
 ml_chance=1
