@@ -31,6 +31,7 @@ def main():
     parser.add_argument("--numPhiSteps", type=int, default=10, help="number of mini-simulations to do between phi and phi+delta_phi if args.rotate is True")
     parser.add_argument("--totalDeg", type=float, help="total amount of crystal roataion in degrees (default=180)", default=180)
     parser.add_argument("--cbf", action="store_true", help="In addition to nexus, save a CBF file for each image simulated")
+    parser.add_argument("--randomizerot", action="store_true",help="randomize the rotation of each shot, in which case totalDeg is irrelevant")
     args = parser.parse_args()
 
     import os
@@ -160,6 +161,13 @@ def main():
     tsims = []
 
     saved_h5s = []
+    
+    random_states = None
+    if args.randomizerot:
+        if COMM.rank==0:
+            np.random.seed()
+            random_states = np.random.permutation(args.numimg*100)[:args.numimg]
+        random_states = COMM.bcast(random_states)
 
     for i_shot in range(args.numimg):
 
@@ -169,7 +177,10 @@ def main():
         print("Doing shot %d/%d" % (i_shot+1, args.numimg))
         Rphi = gonio_axis.axis_and_angle_as_r3_rotation_matrix(delta_phi*i_shot, deg=False)
         Uphi = Rphi * U0
+        if args.randomizerot:
+            Uphi = sqr(Rotation.random(1, random_states[i_shot]).as_matrix().ravel())
         CRYSTAL.set_U(Uphi)
+
 
         t = time.time()
 
