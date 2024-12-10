@@ -49,7 +49,7 @@ class resnetDown(nn.Module):
         self.input_mod = nn.Sequential(conv_norm(1, 32, kernel_size=ks, stride=2, padding=pad_from_ks(ks)), self.mx)
 
         # make the residual blocks ...
-        self.sb64 = [squeezeBlock (32, 32, 128)] + [squeezeBlock(128,32,128)]*wts[0]
+        self.sb128 = [squeezeBlock (32, 32, 128)] + [squeezeBlock(128,32,128)]*wts[0]
         self.sb256 =  [squeezeBlock(128, 64, 256)] +  [squeezeBlock(256,64,256)]*wts[1]
         self.sb512 =  [squeezeBlock(256, 128, 512)] +  [squeezeBlock(512,128,512)]*wts[2]
         self.sb1024 = [squeezeBlock(512, 256, 1024)] +  [squeezeBlock(1024,256,1024)]*wts[3]
@@ -58,7 +58,7 @@ class resnetDown(nn.Module):
 
     def forward( self, x):
         x = self.input_mod(x)
-        for blocks in [self.sb64, self.sb256, self.sb512, self.sb1024, self.sb2048, self.sb4096]:
+        for blocks in [self.sb128, self.sb256, self.sb512, self.sb1024, self.sb2048, self.sb4096]:
             for calc_resid in blocks:
                 x = calc_resid(x) + calc_resid.input_mod(x)
             x = self.mx(x)
@@ -66,15 +66,14 @@ class resnetDown(nn.Module):
         return x.flatten(1,-1)
 
 class predictMulti(resnetDown):
-    def __init__(self, wts=None, in_feat=4096, hidden_feat=1024, out_feat=1):
+    def __init__(self, wts=None, in_feat=4096):
         super().__init__(wts)
-        fc_hidden = nn.Linear(in_feat, hidden_feat)
-        relu = nn.ReLU()
-        fc_out = nn.Linear(hidden_feat, out_feat)
-        self.predict = nn.Sequential(fc_hidden, relu, fc_out)
+        hidden1024 = nn.Linear(in_feat, 1024)
+        hidden128 = nn.Linear(1024, 128)
+        out = nn.Linear(128,1)
+        self.predict = nn.Sequential(hidden1024, nn.ReLU(), hidden128, out)
 
     def forward(self, x):
         x = super().forward(x)
-        x = self.predict(x)
-        return x 
+        return self.predict(x)
 
