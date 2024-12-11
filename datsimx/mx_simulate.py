@@ -257,6 +257,8 @@ def main():
         h.create_dataset("Umat", data=CRYSTAL.get_U())
         h.create_dataset("Bmat", data=CRYSTAL.get_B())
         h.create_dataset("mos_spread", data=mos_spread)
+        h.create_dataset("energies", data=energies)
+        h.create_dataset("fluxes", data=fluxes)
         #h.create_dataset("img_with_bg", data=img_with_bg)
         h.close()
         saved_h5s.append(h5_name)
