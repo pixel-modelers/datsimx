@@ -54,7 +54,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from datsimx.ml_sep.unet import unet_model
+#from datsimx.ml_sep.unet import unet_model
 from datsimx.ml_sep.dset_loader import WaveData, MlatData, NlattsData
 from datsimx.ml_sep.arch import predictMulti
 from datsimx.ml_sep import arch
@@ -76,6 +76,17 @@ def dice_loss(pred, lab, reduction="mean"):
         dloss = dloss.mean()
     return dloss
 
+
+class diceLoss(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+    def forward(self, pred, lab):
+        numer = (pred[:,0]*lab[:,0]).sum(axis=-1).sum(axis=-1)
+        denom= pred[:,0].sum(axis=-1).sum(axis=-1) + lab[:,0].sum(axis=-1).sum(axis=-1)
+        dloss = 1-2*numer/denom
+        dloss = dloss.mean()
+        return dloss
+
 def one_to_one_dice_loss(pred, lab, reduction="mean"):
     numer = (pred[:,0]*lab[:,0]).sum(axis=-1).sum(axis=-1)
     denom= pred[:,0].sum(axis=-1).sum(axis=-1) + lab[:,0].sum(axis=-1).sum(axis=-1)
@@ -83,6 +94,7 @@ def one_to_one_dice_loss(pred, lab, reduction="mean"):
     if reduction == "mean":
         dloss = dloss.mean()
     return dloss
+
     
 
 from itertools import permutations
@@ -173,14 +185,15 @@ elif args.goal == "sepMulti":
     loss =dice_loss 
 
 else:
-    model = arch.resnetU()
-    model = torch.nn.Sequential(model, sig)
+    #model = arch.resnetU()
+    #model = torch.nn.Sequential(model, sig)
+    model = arch.FCN50()
 
     train_data = WaveData(args.trainf)
-    test_data = WaveData(args.testf) 
+    test_data = WaveData(args.testf,250) 
     val_data = WaveData(args.trainf, maximg=len(test_data))
 
-    loss = one_to_one_dice_loss 
+    loss = diceLoss() #one_to_one_dice_loss 
     if args.adam:
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     else:

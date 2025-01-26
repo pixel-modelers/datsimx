@@ -8,10 +8,13 @@ import torch
 
 class WaveData(Dataset):
 
-    def __init__(self, h5name, maximg=None):
+    def __init__(self, h5name, maximg=None, strong=False):
         self.h5 = h5py.File(h5name, 'r')
         self.wave_masks = self.h5["peakwave_masks"]
-        self.images = self.h5["raw_images"]
+        if strong:
+            self.images = self.h5["strong_masks"]
+        else:
+            self.images = self.h5["raw_images"]
         if maximg is not None:
             assert maximg < self.wave_masks.shape[0]
         self.maximg = maximg
