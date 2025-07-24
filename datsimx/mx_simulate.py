@@ -24,13 +24,31 @@ def main():
     parser.add_argument("--oversample", type=int, default=1, help="pixel oversample factor (increase if spots are sharp)")
     parser.add_argument("--numimg", type=int, default=180, help="number of images in 180 deg rotation")
     parser.add_argument("--noWaveImg", action="store_true", help="Dont write the wavelength-per-pixel image")
-    parser.add_argument("--xtalSize", type=float, default=0.5, help="xtal size in mm")
+    parser.add_argument("--xtalSize", type=float, default=None, help="xtal size in mm")
     parser.add_argument("--gain", default=1, type=float, help="ADU per photon")
+    parser.add_argument("--calib", default=3, type=float)
+    parser.add_argument("--PSF", default=0, type=float)
+    parser.add_argument("--ADC", default=0, type=float)
     parser.add_argument("--cuda", action="store_true", help="set DIFFBRAGG_USE_CUDA=1 env var to run CUDA kernel")
     parser.add_argument("--rotate", action="store_true", help="rotate the crystal between exposures")
     parser.add_argument("--numPhiSteps", type=int, default=10, help="number of mini-simulations to do between phi and phi+delta_phi if args.rotate is True")
     parser.add_argument("--totalDeg", type=float, help="total amount of crystal roataion in degrees (default=180)", default=180)
     parser.add_argument("--cbf", action="store_true", help="In addition to nexus, save a CBF file for each image simulated")
+    parser.add_argument("--specFile", default=None, type=str, help="path to .lam file (precognition format)")
+    parser.add_argument("--pdbFile", default=None, type=str, help="path to pdb file for structure factor simulation")
+    parser.add_argument("--mtzFile", default=None, type=str, help="path to mtz file containing structure factors. note, this supersedes pdbFile argument")
+    parser.add_argument("--mtzLabel", default=None, type=str, help="mtz label pointing to structure factors")
+    parser.add_argument("--nitro",  action="store_true", help="simulate ntrogenase spread")
+    parser.add_argument("--useSpreadData",  action="store_true", help="use spread")
+    parser.add_argument("--dist", type=float, help="detector distance in mm", default=200)
+    parser.add_argument("--waterThick", type=float, default=2.5)
+    parser.add_argument("--Nabc", default=[100,100,100], nargs=3, type=float)
+    parser.add_argument("--spotScale", default=None, help="override xtalSize param", type=float)
+    parser.add_argument("--ksol", default=0.4, type=float)
+    parser.add_argument("--bsol", default=120, type=float)
+    parser.add_argument("--maskFile", type=str, default=None)
+    parser.add_argument("--maskKey", type=str, default="mask")
+    parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
     import os
@@ -50,7 +68,7 @@ def main():
     from scitbx.matrix import col, sqr
     from scitbx.array_family import flex
     from dxtbx.model import Experiment, ExperimentList
-
+    import dxtbx
 
     from datsimx import make_nexus
 
@@ -62,7 +80,15 @@ def main():
     # convenience files from this repository
     this_dir = os.path.dirname(__file__)
     spec_file = os.path.join(this_dir, 'from_vukica.lam')  # intensity vs wavelength
+    if args.specFile is not None:
+        spec_file = args.specFile
     pdb_file = os.path.join(this_dir, '7lvc.pdb')
+    if args.pdbFile is not None:
+        pdb_file = args.pdbFile
+    if args.nitro:
+        pdb_file = os.path.join(os.path.dirname(__file__), "nitro/av1_highres_aom_w_fe_oxstates.pdb")
+        assert os.path.exists(pdb_file)
+        print(f"Will use nitro file {pdb_file}")
     air_name = os.path.join(this_dir, 'air.stol')
     total_flux=5e9
     beam_size_mm=0.01
@@ -76,15 +102,19 @@ def main():
             o.write(cmd+"\n")
     COMM.barrier()
 
-    # Rayonix model
+    # Eiger model
     DETECTOR = DetectorFactory.simple(
         sensor='PAD',
-        distance=200,  # mm
-        beam_centre=(170, 170),  # mm
+        distance=args.dist,  # mm
+        beam_centre=(155.5875, 163.6125),  # mm
         fast_direction='+x',
         slow_direction='-y',
-        pixel_size=(.08854, .08854),  # mm
-        image_size=(3840, 3840))
+        pixel_size=(.075, .075),  # mm
+        image_size=(4148, 4362))
+    MASK = np.ones((4362, 4148)).astype(bool)
+    if args.maskFile is not None:
+        MASK = h5py.File(args.maskFile, "r")[args.maskKey][()]
+        assert MASK.shape==(4362, 4148)
 
     try:
         weights, energies = db_utils.load_spectra_file(spec_file)
@@ -102,12 +132,22 @@ def main():
 
     BEAM = BeamFactory.simple(ave_wave)
 
-    Fcalc = db_utils.get_complex_fcalc_from_pdb(pdb_file, wavelength=ave_wave) #, k_sol=-0.8, b_sol=120) #, k_sol=0.8, b_sol=100)
-    Famp = Fcalc.as_amplitude_array()
+    #Fcalc = db_utils.get_complex_fcalc_from_pdb(pdb_file, wavelength=ave_wave) #, k_sol=-0.8, b_sol=120) #, k_sol=0.8, b_sol=100)
+    print(f"fcalcs from {pdb_file}")
+    Fcalc = db_utils.get_complex_fcalc_from_pdb(pdb_file, wavelength=ave_wave, k_sol=args.ksol, b_sol=args.bsol)
+
+    spread_data = None
+    if args.nitro and args.useSpreadData:
+        # in this case leave Fcalc complex valued
+        from datsimx.nitro import simulate_av1_fcalc
+        atom_data, fprime, fdblprime = simulate_av1_fcalc.gen_db_inputs(energies)
+        spread_data = {"atoms": atom_data, "fprime": fprime, "fdblprime": fdblprime}
+    else:
+        Fcalc = Fcalc.as_amplitude_array()
 
     water_bkgrnd = utils.sim_background(
         DETECTOR, BEAM, [ave_wave], [1], total_flux, pidx=0, beam_size_mm=beam_size_mm,
-        Fbg_vs_stol=None, sample_thick_mm=2.5, density_gcm3=1, molecular_weight=18)
+        Fbg_vs_stol=None, sample_thick_mm=args.waterThick, density_gcm3=1, molecular_weight=18)
 
     air_Fbg, air_stol = np.loadtxt(air_name).T
     air_stol = flex.vec2_double(list(zip(air_Fbg, air_stol)))
@@ -122,6 +162,7 @@ def main():
     air = air.as_numpy_array().reshape(img_sh)
 
     if args.mono:
+        assert not args.nitro
         energies = np.array([ave_en])
         weights = np.array([1])
 
@@ -129,10 +170,10 @@ def main():
     fluxes = weights / weights.sum() * total_flux * len(weights)
     print("Simulating with %d energies" % num_en)
     print("Mean energy:", ave_wave)
-    sg = Famp.space_group()
-    print("unit cell, space group:\n", Famp, "\n")
+    sg = Fcalc.space_group()
+    print("unit cell, space group:\n", Fcalc, "\n")
 
-    ucell = Famp.unit_cell()
+    ucell = Fcalc.unit_cell()
     Breal = ucell.orthogonalization_matrix()
     # real space vectors
     a = Breal[0], Breal[3], Breal[6]
@@ -152,7 +193,7 @@ def main():
     gonio_axis = col((1,0,0))
     U0 = sqr(CRYSTAL.get_U())  # starting Umat
 
-    Nabc = 100,100,100
+    Nabc = args.Nabc
 
     mos_spread = args.mosSpread
     num_mos = args.mosDoms
@@ -177,21 +218,25 @@ def main():
         from simtbx.diffBragg.device import DeviceWrapper
         with DeviceWrapper(device_Id) as _:
 
-
+            verbose = False
+            if args.verbose:
+                verbose = COMM.rank==0
             out = diffBragg_forward(
-                CRYSTAL, DETECTOR, BEAM, Famp, energies, fluxes,
+                CRYSTAL, DETECTOR, BEAM, Fcalc, energies, fluxes,
                 oversample=args.oversample, Ncells_abc=Nabc,
                 mos_dom=num_mos, mos_spread=mos_spread, beamsize_mm=beam_size_mm,
                 device_Id=device_Id,
                 show_params=False, crystal_size_mm=args.xtalSize, printout_pix=printout_pix,
-                verbose=COMM.rank==0, default_F=0, interpolate=0,
+                verbose=verbose, default_F=0, interpolate=0,
                 mosaicity_random_seeds=None, div_mrad=args.div,
                 divsteps=args.divSteps,
-                show_timings=COMM.rank==0,
+                spot_scale_override=args.spotScale,
+                show_timings=verbose,
                 nopolar=False, diffuse_params=None,
                 delta_phi=delta_phi*180/np.pi if args.rotate else None,
                 num_phi_steps = args.numPhiSteps if args.rotate else 1,
-                perpixel_wavelen=not args.noWaveImg)
+                perpixel_wavelen=not args.noWaveImg,
+                spread_data=spread_data)
 
         if args.noWaveImg:
             img = out
@@ -209,16 +254,18 @@ def main():
                 k_img = k_img[0]
                 l_img = l_img[0]
 
+        bg_only = water_bkgrnd+air
+
         img_with_bg = img +water_bkgrnd + air
 
         SIM = nanoBragg(detector=DETECTOR, beam=BEAM)
         SIM.beamsize_mm = beam_size_mm
         SIM.exposure_s = 1
         SIM.flux = total_flux
-        SIM.adc_offset_adu = 10
+        SIM.adc_offset_adu = args.ADC
         SIM.detector_psf_kernel_radius_pixels = 5
-        SIM.detector_calibration_noice_pct = 3
-        SIM.detector_psf_fwhm_mm = 0.1
+        SIM.detector_calibration_noice_pct = args.calib
+        SIM.detector_psf_fwhm_mm = args.PSF
         SIM.quantum_gain = args.gain
         SIM.readout_noise_adu = 3
         SIM.raw_pixels += flex.double((img_with_bg).ravel())
@@ -228,6 +275,7 @@ def main():
             SIM.to_cbf(cbf_name, cbf_int=True)
         
         noise_image = SIM.raw_pixels.as_numpy_array()
+        noise_image[ ~MASK] = -1
         
         h5_name = os.path.join(args.outdir, "shot_%d_%05d.h5" % (args.run, i_shot+1))
         #SIM.to_cbf(cbf_name, cbf_int=True)
