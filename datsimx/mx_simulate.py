@@ -39,6 +39,7 @@ def main():
     parser.add_argument("--mtzFile", default=None, type=str, help="path to mtz file containing structure factors. note, this supersedes pdbFile argument")
     parser.add_argument("--mtzLabel", default=None, type=str, help="mtz label pointing to structure factors")
     parser.add_argument("--nitro",  action="store_true", help="simulate ntrogenase spread")
+    parser.add_argument("--rubre",  action="store_true", help="simulate rubredoxin spread sim")
     parser.add_argument("--useSpreadData",  action="store_true", help="use spread")
     parser.add_argument("--dist", type=float, help="detector distance in mm", default=200)
     parser.add_argument("--waterThick", type=float, default=2.5)
@@ -71,6 +72,7 @@ def main():
     import dxtbx
 
     from datsimx import make_nexus
+    from datsimx.fcalcs import fcalc, db_anom_inputs
 
     if args.cuda:
         os.environ["DIFFBRAGG_USE_CUDA"] = "1"
@@ -86,7 +88,11 @@ def main():
     if args.pdbFile is not None:
         pdb_file = args.pdbFile
     if args.nitro:
-        pdb_file = os.path.join(os.path.dirname(__file__), "nitro/av1_highres_aom_w_fe_oxstates.pdb")
+        pdb_file = os.path.join(os.path.dirname(__file__), "fcalcs/av1_highres_aom_w_fe_oxstates.pdb")
+        assert os.path.exists(pdb_file)
+        print(f"Will use nitro file {pdb_file}")
+    if args.rubre:
+        pdb_file = os.path.join(os.path.dirname(__file__), "fcalcs/1brf_noSolv.pdb")
         assert os.path.exists(pdb_file)
         print(f"Will use nitro file {pdb_file}")
     air_name = os.path.join(this_dir, 'air.stol')
@@ -127,6 +133,7 @@ def main():
         energies = np.linspace(energies.min()+1e-6, energies.max()-1e-6, args.enSteps)
         weights = wts_I(energies)
 
+    # should do a weighted mean here:
     ave_en = np.mean(energies)
     ave_wave = utils.ENERGY_CONV / ave_en
 
@@ -134,13 +141,17 @@ def main():
 
     #Fcalc = db_utils.get_complex_fcalc_from_pdb(pdb_file, wavelength=ave_wave) #, k_sol=-0.8, b_sol=120) #, k_sol=0.8, b_sol=100)
     print(f"fcalcs from {pdb_file}")
-    Fcalc = db_utils.get_complex_fcalc_from_pdb(pdb_file, wavelength=ave_wave, k_sol=args.ksol, b_sol=args.bsol)
+    fcalc_wave = None if args.useSpreadData else ave_wave
+    no_anom_for_atoms = None
+    if args.useSpreadData:
+        no_anom_for_atoms = {"Fe"}
+    Fcalc = fcalc.get_complex_fcalc_from_pdb(pdb_file, wavelength=ave_wave, k_sol=args.ksol, b_sol=args.bsol, no_anom_for_atoms=no_anom_for_atoms)
 
     spread_data = None
-    if args.nitro and args.useSpreadData:
+    if (args.nitro or args.rubre) and args.useSpreadData:
         # in this case leave Fcalc complex valued
-        from datsimx.nitro import simulate_av1_fcalc
-        atom_data, fprime, fdblprime = simulate_av1_fcalc.gen_db_inputs(energies)
+        which = "nitro" if args.nitro else "rubre"
+        atom_data, fprime, fdblprime = db_anom_inputs.gen_db_inputs(energies, which=which, rubre_fe_state=0)
         spread_data = {"atoms": atom_data, "fprime": fprime, "fdblprime": fdblprime}
     else:
         Fcalc = Fcalc.as_amplitude_array()
@@ -151,7 +162,8 @@ def main():
 
     air_Fbg, air_stol = np.loadtxt(air_name).T
     air_stol = flex.vec2_double(list(zip(air_Fbg, air_stol)))
-    air = utils.sim_background(DETECTOR, BEAM, [ave_wave], [1], total_flux, pidx=0, beam_size_mm=beam_size_mm,
+    air = utils.sim_background(DETECTOR, BEAM, [ave_wave], [1], 
+                            total_flux, pidx=0, beam_size_mm=beam_size_mm,
                             molecular_weight=14,
                             sample_thick_mm=5,
                             Fbg_vs_stol=air_stol, density_gcm3=1.2e-3)
