@@ -50,6 +50,18 @@ def main():
     parser.add_argument("--maskFile", type=str, default=None)
     parser.add_argument("--maskKey", type=str, default="mask")
     parser.add_argument("--verbose", action="store_true")
+
+    # NEW ARGUMENTS FOR CRYSTAL SPLITTING
+    parser.add_argument("--splitPhiStart", type=float, default=-1,
+                        help="Start of rotation range (degrees) for crystal splitting (inclusive). -1 for no split.")
+    parser.add_argument("--splitPhiEnd", type=float, default=-1,
+                        help="End of rotation range (degrees) for crystal splitting (inclusive). -1 for no split.")
+    parser.add_argument("--splitRotAxis", type=float, nargs=3, default=[1,0,0],
+                        help="Rotation axis for the split crystal, e.g., '1 0 0'.")
+    parser.add_argument("--splitRotAngle", type=float, default=0.1,
+                        help="Rotation angle (degrees) for the split crystal relative to the main crystal.")
+    parser.add_argument("--splitScale", type=float, default=0.5,
+                         help="Intensity scale factor for the split crystal relative to the main crystal (0 to 1).")
     args = parser.parse_args()
 
     import os
@@ -92,7 +104,7 @@ def main():
         assert os.path.exists(pdb_file)
         print(f"Will use nitro file {pdb_file}")
     if args.rubre:
-        pdb_file = os.path.join(os.path.dirname(__file__), "fcalcs/1brf_noSolv.pdb")
+        pdb_file = os.path.join(os.path.dirname(__file__), "fcalcs/1brf.pdb")
         assert os.path.exists(pdb_file)
         print(f"Will use nitro file {pdb_file}")
     air_name = os.path.join(this_dir, 'air.stol')
@@ -127,7 +139,7 @@ def main():
     except:
         weights, energies = db_utils.load_spectra_file(spec_file, delim=" ")
 
-    if args.enSteps is not None:
+    if args.enSteps is not None and len(energies) > 1:
         from scipy.interpolate import interp1d
         wts_I = interp1d(energies, weights)# bounds_error=False, fill_value=0)
         energies = np.linspace(energies.min()+1e-6, energies.max()-1e-6, args.enSteps)
@@ -175,6 +187,7 @@ def main():
 
     if args.mono:
         assert not args.nitro
+        assert not args.rubre
         energies = np.array([ave_en])
         weights = np.array([1])
 
@@ -200,10 +213,33 @@ def main():
     randU = COMM.bcast(randU)
     CRYSTAL.set_U(randU.ravel())
 
+    # Initialize second crystal for splitting
+    CRYSTAL2 = None
+    if args.splitPhiStart != -1 and args.splitPhiEnd != -1:
+        if COMM.rank == 0:
+            print(f"Crystal splitting enabled from {args.splitPhiStart} to {args.splitPhiEnd} degrees.")
+            print(f"Split crystal rotation: {args.splitRotAngle} degrees around {args.splitRotAxis}.")
+            print(f"Split crystal intensity scale: {args.splitScale}.")
+
+        # Create the second crystal by copying the first
+        CRYSTAL2 = Crystal(a, b, c, sg)
+        CRYSTAL2.set_U(randU.ravel()) # Start with the same orientation
+
+        # Apply a small rotation to CRYSTAL2's U-matrix
+        split_rot_ax = col(args.splitRotAxis)
+
+        R_split = split_rot_ax.axis_and_angle_as_r3_rotation_matrix(args.splitRotAngle, deg=True)
+        #split_rot_mat = Rotation.from_rotvec(np.deg2rad(args.splitRotAngle) * np.array(args.splitRotAxis)).as_matrix()
+        U2_initial = sqr(CRYSTAL2.get_U()) * R_split
+        CRYSTAL2.set_U(U2_initial)
+
+
     delta_phi = total_rot/ args.numimg
 
     gonio_axis = col((1,0,0))
     U0 = sqr(CRYSTAL.get_U())  # starting Umat
+    if CRYSTAL2 is not None:
+        U0_2 = sqr(CRYSTAL2.get_U())  # starting Umat2
 
     Nabc = args.Nabc
 
@@ -220,6 +256,7 @@ def main():
             continue
         tsim = time.time()
         print("Doing shot %d/%d" % (i_shot+1, args.numimg))
+        current_phi_deg = delta_phi*i_shot*180/np.pi
         Rphi = gonio_axis.axis_and_angle_as_r3_rotation_matrix(delta_phi*i_shot, deg=False)
         Uphi = Rphi * U0
         CRYSTAL.set_U(Uphi)
@@ -255,6 +292,38 @@ def main():
             wave_img = h_img = k_img = l_img = None
         else:
             img, wave_img, h_img, k_img, l_img = out
+
+        # Simulate for the second crystal if within the split range
+        img_split = np.zeros(img_sh, dtype=np.float32)
+        if CRYSTAL2 and args.splitPhiStart <= current_phi_deg <= args.splitPhiEnd:
+            Uphi2 = Rphi * U0_2 # Apply the same rotation to the second crystal's initial U-matrix
+            CRYSTAL2.set_U(Uphi2)
+
+            print(f"  --> Simulating split crystal for shot {i_shot+1} (phi={current_phi_deg:.2f} deg)")
+            out2 = diffBragg_forward(
+                CRYSTAL2, DETECTOR, BEAM, Fcalc, energies, fluxes, # Use same Fcalc, energies, fluxes
+                oversample=args.oversample, Ncells_abc=Nabc,
+                mos_dom=num_mos, mos_spread=mos_spread, beamsize_mm=beam_size_mm,
+                device_Id=device_Id,
+                show_params=False, crystal_size_mm=args.xtalSize, printout_pix=printout_pix,
+                verbose=verbose, default_F=0, interpolate=0,
+                mosaicity_random_seeds=None, div_mrad=args.div,
+                divsteps=args.divSteps,
+                spot_scale_override=args.spotScale,
+                show_timings=verbose,
+                nopolar=False, diffuse_params=None,
+                delta_phi=delta_phi*180/np.pi if args.rotate else None,
+                num_phi_steps = args.numPhiSteps if args.rotate else 1,
+                perpixel_wavelen=False, # Only want wave_img from the main crystal
+                spread_data=spread_data)
+            img2 = out2
+
+            #if len(img2.shape)==3:
+            #    img2 = img2[0]
+            img_split = img2 * args.splitScale # Apply scaling to the split component
+
+        img = img + img_split # Combine images from both crystals 
+
 
         t = time.time()-t
         print("Took %.4f sec to sim" % t)
@@ -304,6 +373,12 @@ def main():
         h.create_dataset("noise_image", data=noise_image.astype(np.float32))
         h.create_dataset("delta_phi", data=delta_phi)
         h.create_dataset("Umat", data=CRYSTAL.get_U())
+        if CRYSTAL2 is not None:
+            if args.splitPhiStart <= current_phi_deg <= args.splitPhiEnd:
+                h.create_dataset("Umat_split", data=CRYSTAL2.get_U())
+            else:
+                h.create_dataset("Umat_split", data=(1,0,0,0,1,0,0,0,1))
+
         h.create_dataset("Bmat", data=CRYSTAL.get_B())
         h.create_dataset("mos_spread", data=mos_spread)
         #h.create_dataset("img_with_bg", data=img_with_bg)
