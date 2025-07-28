@@ -4,7 +4,7 @@ def main():
     from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
     parser = ArgumentParser(
         formatter_class=ArgumentDefaultsHelpFormatter,
-        description="""Generate pseudo Laue stills and save them as Nexus master files.
+        description="""Generate diffraction images and save them as Nexus master files.
 Optionally, an HDF5 file containing per-pixel wavelengths will be written unless --noWaveImg is specified.
 
         """,
@@ -13,7 +13,7 @@ Example usage:
 python mx_simulate.py my_output_directory --numimg 360 --mosSpread 0.05 --cuda
 
 For two-crystal domain simulation:
-python mx_simulate.py my_output_directory_split --numimg 180 --splitPhiStart 45 --splitPhiEnd 135 --splitRotAxis "0 1 0" --splitRotAngle 0.2 --splitScale 0.75
+python mx_simulate.py my_output_directory_split --numimg 180 --splitPhiStart 45 --splitPhiEnd 135 --splitRotAxis 0 1 0 --splitRotAngle 0.2 --splitScale 0.75
         """
     )
     parser.add_argument(
