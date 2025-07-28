@@ -1,12 +1,3 @@
-"""
-Generate pseudo laue stills, saves as nexus master file
-Unless --noWaveImg flag is passed, an HDF5 file will be written containing the per-pixel wavelengths
-Need to get 3 files first:
-wget https://raw.githubusercontent.com/dermen/e080_laue/master/air.stol
-wget https://raw.githubusercontent.com/dermen/e080_laue/master/from_vukica.lam
-iotbx.fetch_pdb 7lvc
-"""
-
 
 def main():
 
@@ -16,17 +7,13 @@ def main():
         description="""Generate pseudo Laue stills and save them as Nexus master files.
 Optionally, an HDF5 file containing per-pixel wavelengths will be written unless --noWaveImg is specified.
 
-Before running, ensure you have these files:
-- wget https://raw.githubusercontent.com/dermen/e080_laue/master/air.stol
-- wget https://raw.githubusercontent.com/dermen/e080_laue/master/from_vukica.lam
-- iotbx.fetch_pdb 7lvc
         """,
         epilog="""
 Example usage:
 python mx_simulate.py my_output_directory --numimg 360 --mosSpread 0.05 --cuda
 
 For two-crystal domain simulation:
-python mx_simulate.py my_output_directory_split --numimg 180 --splitPhiStart 45 --splitPhiEnd 135 --splitRotAxis "0,1,0" --splitRotAngle 0.2 --splitScale 0.75
+python mx_simulate.py my_output_directory_split --numimg 180 --splitPhiStart 45 --splitPhiEnd 135 --splitRotAxis "0 1 0" --splitRotAngle 0.2 --splitScale 0.75
         """
     )
     parser.add_argument(
@@ -40,8 +27,8 @@ python mx_simulate.py my_output_directory_split --numimg 180 --splitPhiStart 45 
     sim_params_group.add_argument(
         "--mosSpread",
         type=float,
-        default=0.025,
-        help="Mosaic angular spread in degrees (FWHM). Default is 0.025 degrees.",
+        default=0.1,
+        help="Mosaic angular spread in degrees (FWHM). Default is 0.1 degrees.",
     )
     sim_params_group.add_argument(
         "--mosDoms",
@@ -64,32 +51,32 @@ python mx_simulate.py my_output_directory_split --numimg 180 --splitPhiStart 45 
     sim_params_group.add_argument(
         "--enSteps",
         type=int,
-        default=322,
-        help="Number of spectrum samples. Use to upsample or downsample the provided spectrum file. Default is 322.",
+        default=100,
+        help="Number of spectrum samples. Use to upsample or downsample the provided spectrum file. Default is 100.",
     )
     sim_params_group.add_argument(
         "--oversample",
         type=int,
         default=1,
-        help="Pixel oversampling factor. Increase this value if simulated spots appear sharp or aliased. Default is 1.",
+        help="Pixel oversampling factor. Increase this value if Bragg reflections appear discontinuous or un-realistically choppy.",
     )
     sim_params_group.add_argument(
         "--xtalSize",
         type=float,
         default=None,
-        help="Crystal size in mm. If not specified, Nabc will be used to determine crystal size. It's recommended to set either this or Nabc.",
+        help="Crystal size in mm. If not specified, Nabc will be used to determine crystal size.",
     )
     sim_params_group.add_argument(
         "--Nabc",
-        default=[100, 100, 100],
+        default=[30,30,30],
         nargs=3,
         type=float,
-        help="Number of unit cells along a, b, and c axes. Used to determine crystal size if --xtalSize is not set. Format: 'N_a N_b N_c'.",
+        help="Number of unit cells along a, b, and c axes. Used to determine crystal size if --xtalSize is not set. Format: 'N_a N_b N_c'. Default is 30 30 30",
     )
     sim_params_group.add_argument(
         "--spotScale",
         default=None,
-        help="Override the crystal size parameter to scale spot intensities directly. Float value. Useful for quick intensity adjustments.",
+        help="Override the crystal size parameter to scale spot intensities directly. Float value. Useful for quick intensity adjustments. Also, for best results, use spotScale as opposed to xtalSize, as fine-tuning spotScale leads to more realistic intensities.",
         type=float,
     )
     sim_params_group.add_argument(
@@ -163,13 +150,13 @@ python mx_simulate.py my_output_directory_split --numimg 180 --splitPhiStart 45 
         "--gain",
         default=1,
         type=float,
-        help="ADU (Analog-to-Digital Unit) per photon. This is a scaling factor applied to the simulated photon counts. Default is 1.",
+        help="ADU (Area detector units) per photon. This is a scaling factor applied to the simulated photon counts. Default is 1.",
     )
     det_output_group.add_argument(
         "--calib",
         default=3,
         type=float,
-        help="Detector calibration noise percentage. This adds a percentage of the signal as noise. Default is 3 (meaning 3 percent).",
+        help="Detector calibration noise percentage. This option multiplies each simulated pixel by random noise term, whose strength is proportional to a percentage of the signal. Default is 3 (meaning 3 percent).",
     )
     det_output_group.add_argument(
         "--PSF",
@@ -186,24 +173,17 @@ python mx_simulate.py my_output_directory_split --numimg 180 --splitPhiStart 45 
     det_output_group.add_argument(
         "--cbf",
         action="store_true",
-        help="In addition to Nexus output, save a CBF file for each simulated image. CBF files are common for crystallographic data.",
+        help="In addition to Nexus output, save a CBF file for each simulated image. The CBF file will lack goniometer information though and therefore will not work with XDS.",
     )
     det_output_group.add_argument(
         "--noWaveImg",
         action="store_true",
-        help="Do not write the wavelength-per-pixel HDF5 file. This can save disk space if per-pixel wavelength information is not needed.",
+        help="Do not calculate the wavelength-per-pixel. This can speed up simulation and save disk space if per-pixel wavelength information is not needed.",
     )
     det_output_group.add_argument(
-        "--maskFile",
-        type=str,
-        default=None,
-        help="Path to an HDF5 file containing a detector mask. The mask should be a boolean array with dimensions matching the detector image size (e.g., from a previous data collection).",
-    )
-    det_output_group.add_argument(
-        "--maskKey",
-        type=str,
-        default="mask",
-        help="Key within the --maskFile HDF5 file to access the mask dataset. Default is 'mask'.",
+        "--eigerMask",
+        action="store_true",
+        help="if True, simulate onto an Eiger panel geometry. Pixels in gaps between Eiger panels will be set to -1.",
     )
 
     # Input Data and GPU Group
@@ -212,7 +192,8 @@ python mx_simulate.py my_output_directory_split --numimg 180 --splitPhiStart 45 
         "--specFile",
         default=None,
         type=str,
-        help="Path to a .lam file (Precoginition format) defining the incident beam spectrum (intensity vs. wavelength). If not provided, a default internal spectrum will be used.",
+        help="""Path to a .lam file (Precoginition format) defining the incident beam spectrum (intensity vs. wavelength). If not provided, a monochromatic simulation will be used. To obtain a default spectrum similar to bioCars, try:
+wget https://raw.githubusercontent.com/dermen/e080_laue/master/from_vukica.lam"""
     )
     input_gpu_group.add_argument(
         "--pdbFile",
@@ -235,12 +216,12 @@ python mx_simulate.py my_output_directory_split --numimg 180 --splitPhiStart 45 
     input_gpu_group.add_argument(
         "--nitro",
         action="store_true",
-        help="Simulate nitrogenase-specific spread data. This option will override --pdbFile with a predefined nitrogenase PDB (av1_highres_aom_w_fe_oxstates.pdb).",
+        help="Simulate nitrogenase-specific spread data. This option will override --pdbFile with a predefined nitrogenase PDB (datsimx/fcalcs/nitro.pdb).",
     )
     input_gpu_group.add_argument(
         "--rubre",
         action="store_true",
-        help="Simulate rubredoxin-specific spread data. This option will override --pdbFile with a predefined rubredoxin PDB (1brf.pdb).",
+        help="Simulate rubredoxin-specific spread data. This option will override --pdbFile with a predefined rubredoxin PDB (datsimx/fcalcs/rubre.pdb).",
     )
     input_gpu_group.add_argument(
         "--useSpreadData",
@@ -248,9 +229,10 @@ python mx_simulate.py my_output_directory_split --numimg 180 --splitPhiStart 45 
         help="Enable the use of energy-dependent spread data (e.g., for anomalous scattering effects). Typically used in conjunction with --nitro or --rubre.",
     )
     input_gpu_group.add_argument(
-        "--mono",
-        action='store_true',
-        help="Perform a monochromatic simulation using the average wavelength of the provided spectrum. This will effectively treat the beam as single-energy and disables spread data if used.",
+        "--monoEnergy",
+        type=float,
+        default=7120,
+        help="Perform a monochromatic simulation using this energy (in eV). Note, if specFile is provide, specFile will override monoEnergy.",
     )
     input_gpu_group.add_argument(
         "--ndev",
@@ -330,20 +312,18 @@ python mx_simulate.py my_output_directory_split --numimg 180 --splitPhiStart 45 
 
     # convenience files from this repository
     this_dir = os.path.dirname(__file__)
-    spec_file = os.path.join(this_dir, 'from_vukica.lam')  # intensity vs wavelength
-    if args.specFile is not None:
-        spec_file = args.specFile
+
     pdb_file = os.path.join(this_dir, '7lvc.pdb')
     if args.pdbFile is not None:
         pdb_file = args.pdbFile
     if args.nitro:
-        pdb_file = os.path.join(os.path.dirname(__file__), "fcalcs/av1_highres_aom_w_fe_oxstates.pdb")
+        pdb_file = os.path.join(this_dir, "fcalcs/nitro.pdb")
         assert os.path.exists(pdb_file)
         print(f"Will use nitro file {pdb_file}")
     if args.rubre:
-        pdb_file = os.path.join(os.path.dirname(__file__), "fcalcs/1brf.pdb")
+        pdb_file = os.path.join(this_dir, "rubre.pdb")
         assert os.path.exists(pdb_file)
-        print(f"Will use nitro file {pdb_file}")
+        print(f"Will use rubre file {pdb_file}")
     air_name = os.path.join(this_dir, 'air.stol')
     total_flux=5e9
     beam_size_mm=0.01
@@ -367,28 +347,35 @@ python mx_simulate.py my_output_directory_split --numimg 180 --splitPhiStart 45 
         pixel_size=(.075, .075),  # mm
         image_size=(4148, 4362))
     MASK = np.ones((4362, 4148)).astype(bool)
-    if args.maskFile is not None:
-        MASK = h5py.File(args.maskFile, "r")[args.maskKey][()]
+    if args.eigerMask:
+        mask_file = os.path.join(this_dir, "eiger_mask.hdf5")
+        MASK = h5py.File(mask_file, "r")[args.maskKey][()]
         assert MASK.shape==(4362, 4148)
 
-    try:
-        weights, energies = db_utils.load_spectra_file(spec_file)
-    except:
-        weights, energies = db_utils.load_spectra_file(spec_file, delim=" ")
+    if args.specFile is not None:
+        spec_file = args.specFile
+        try:
+            weights, energies = db_utils.load_spectra_file(spec_file)
+        except:
+            weights, energies = db_utils.load_spectra_file(spec_file, delim=" ")
 
-    if args.enSteps is not None and len(energies) > 1:
-        from scipy.interpolate import interp1d
-        wts_I = interp1d(energies, weights)# bounds_error=False, fill_value=0)
-        energies = np.linspace(energies.min()+1e-6, energies.max()-1e-6, args.enSteps)
-        weights = wts_I(energies)
+        if args.enSteps is not None and len(energies) > 1:
+            from scipy.interpolate import interp1d
+            wts_I = interp1d(energies, weights)# bounds_error=False, fill_value=0)
+            energies = np.linspace(energies.min()+1e-6, energies.max()-1e-6, args.enSteps)
+            weights = wts_I(energies)
 
-    # should do a weighted mean here:
-    ave_en = np.mean(energies)
-    ave_wave = utils.ENERGY_CONV / ave_en
+        # should do a weighted mean here:
+        ave_en = np.mean(energies)
+        ave_wave = utils.ENERGY_CONV / ave_en
+    else:
+        energies = np.array([args.monoEnergy])
+        weights = np.array([1])
+        ave_en = args.monoEnergy
+        ave_wave = utils.ENERGY_CONV / ave_en
 
     BEAM = BeamFactory.simple(ave_wave)
 
-    #Fcalc = db_utils.get_complex_fcalc_from_pdb(pdb_file, wavelength=ave_wave) #, k_sol=-0.8, b_sol=120) #, k_sol=0.8, b_sol=100)
     print(f"fcalcs from {pdb_file}")
     fcalc_wave = None if args.useSpreadData else ave_wave
     no_anom_for_atoms = None
@@ -422,11 +409,6 @@ python mx_simulate.py my_output_directory_split --numimg 180 --splitPhiStart 45 
     water_bkgrnd = water_bkgrnd.as_numpy_array().reshape(img_sh)
     air = air.as_numpy_array().reshape(img_sh)
 
-    if args.mono:
-        assert not args.nitro
-        assert not args.rubre
-        energies = np.array([ave_en])
-        weights = np.array([1])
 
     num_en = len(energies)
     fluxes = weights / weights.sum() * total_flux * len(weights)
