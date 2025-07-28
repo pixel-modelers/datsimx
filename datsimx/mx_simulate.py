@@ -321,7 +321,7 @@ wget https://raw.githubusercontent.com/dermen/e080_laue/master/from_vukica.lam""
         assert os.path.exists(pdb_file)
         print(f"Will use nitro file {pdb_file}")
     if args.rubre:
-        pdb_file = os.path.join(this_dir, "rubre.pdb")
+        pdb_file = os.path.join(this_dir, "fcalcs/rubre.pdb")
         assert os.path.exists(pdb_file)
         print(f"Will use rubre file {pdb_file}")
     air_name = os.path.join(this_dir, 'air.stol')
