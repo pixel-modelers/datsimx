@@ -9,60 +9,297 @@ iotbx.fetch_pdb 7lvc
 
 
 def main():
-    from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
-    parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
-    parser.add_argument("outdir", type=str)
-    parser.add_argument("--mosSpread", type=float, default=0.025, help="mosaic ang. spread in degrees (default=0.025)")
-    parser.add_argument("--mosDoms", type=int, default=150, help="number of mosaic domains (default=150)")
-    parser.add_argument("--div", type=float, default=0, help="divergence in mrad (default=0)")
-    parser.add_argument("--divSteps", type=int, default=0, help="number of divergence steps in x,y (hence total num of steps prop. to square of this value)")
-    parser.add_argument("--enSteps", type=int, default=322, help="Number of spectrum samples, use to upsample or downsample the specFile (default=322)")
-    parser.add_argument("--testShot", action="store_true", help="only simulate a single shots")
-    parser.add_argument("--ndev", type=int, default=1, help="number of GPU devices per compute node (default=1)")
-    parser.add_argument("--run", type=int, default=1, help="run number in filename shot_R_#####.cbf")
-    parser.add_argument("--mono", action='store_true', help="use the average wavelength to do mono simulation")
-    parser.add_argument("--oversample", type=int, default=1, help="pixel oversample factor (increase if spots are sharp)")
-    parser.add_argument("--numimg", type=int, default=180, help="number of images in 180 deg rotation")
-    parser.add_argument("--noWaveImg", action="store_true", help="Dont write the wavelength-per-pixel image")
-    parser.add_argument("--xtalSize", type=float, default=None, help="xtal size in mm")
-    parser.add_argument("--gain", default=1, type=float, help="ADU per photon")
-    parser.add_argument("--calib", default=3, type=float)
-    parser.add_argument("--PSF", default=0, type=float)
-    parser.add_argument("--ADC", default=0, type=float)
-    parser.add_argument("--cuda", action="store_true", help="set DIFFBRAGG_USE_CUDA=1 env var to run CUDA kernel")
-    parser.add_argument("--rotate", action="store_true", help="rotate the crystal between exposures")
-    parser.add_argument("--numPhiSteps", type=int, default=10, help="number of mini-simulations to do between phi and phi+delta_phi if args.rotate is True")
-    parser.add_argument("--totalDeg", type=float, help="total amount of crystal roataion in degrees (default=180)", default=180)
-    parser.add_argument("--cbf", action="store_true", help="In addition to nexus, save a CBF file for each image simulated")
-    parser.add_argument("--specFile", default=None, type=str, help="path to .lam file (precognition format)")
-    parser.add_argument("--pdbFile", default=None, type=str, help="path to pdb file for structure factor simulation")
-    parser.add_argument("--mtzFile", default=None, type=str, help="path to mtz file containing structure factors. note, this supersedes pdbFile argument")
-    parser.add_argument("--mtzLabel", default=None, type=str, help="mtz label pointing to structure factors")
-    parser.add_argument("--nitro",  action="store_true", help="simulate ntrogenase spread")
-    parser.add_argument("--rubre",  action="store_true", help="simulate rubredoxin spread sim")
-    parser.add_argument("--useSpreadData",  action="store_true", help="use spread")
-    parser.add_argument("--dist", type=float, help="detector distance in mm", default=200)
-    parser.add_argument("--waterThick", type=float, default=2.5)
-    parser.add_argument("--Nabc", default=[100,100,100], nargs=3, type=float)
-    parser.add_argument("--spotScale", default=None, help="override xtalSize param", type=float)
-    parser.add_argument("--ksol", default=0.4, type=float)
-    parser.add_argument("--bsol", default=120, type=float)
-    parser.add_argument("--maskFile", type=str, default=None)
-    parser.add_argument("--maskKey", type=str, default="mask")
-    parser.add_argument("--verbose", action="store_true")
 
-    # NEW ARGUMENTS FOR CRYSTAL SPLITTING
-    parser.add_argument("--splitPhiStart", type=float, default=-1,
-                        help="Start of rotation range (degrees) for crystal splitting (inclusive). -1 for no split.")
-    parser.add_argument("--splitPhiEnd", type=float, default=-1,
-                        help="End of rotation range (degrees) for crystal splitting (inclusive). -1 for no split.")
-    parser.add_argument("--splitRotAxis", type=float, nargs=3, default=[1,0,0],
-                        help="Rotation axis for the split crystal, e.g., '1 0 0'.")
-    parser.add_argument("--splitRotAngle", type=float, default=0.1,
-                        help="Rotation angle (degrees) for the split crystal relative to the main crystal.")
-    parser.add_argument("--splitScale", type=float, default=0.5,
-                         help="Intensity scale factor for the split crystal relative to the main crystal (0 to 1).")
+    from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
+    parser = ArgumentParser(
+        formatter_class=ArgumentDefaultsHelpFormatter,
+        description="""Generate pseudo Laue stills and save them as Nexus master files.
+Optionally, an HDF5 file containing per-pixel wavelengths will be written unless --noWaveImg is specified.
+
+Before running, ensure you have these files:
+- wget https://raw.githubusercontent.com/dermen/e080_laue/master/air.stol
+- wget https://raw.githubusercontent.com/dermen/e080_laue/master/from_vukica.lam
+- iotbx.fetch_pdb 7lvc
+        """,
+        epilog="""
+Example usage:
+python mx_simulate.py my_output_directory --numimg 360 --mosSpread 0.05 --cuda
+
+For two-crystal domain simulation:
+python mx_simulate.py my_output_directory_split --numimg 180 --splitPhiStart 45 --splitPhiEnd 135 --splitRotAxis "0,1,0" --splitRotAngle 0.2 --splitScale 0.75
+        """
+    )
+    parser.add_argument(
+        "outdir",
+        type=str,
+        help="Output directory for simulated images and Nexus master file.",
+    )
+
+    # Simulation Parameters Group
+    sim_params_group = parser.add_argument_group("Simulation Parameters")
+    sim_params_group.add_argument(
+        "--mosSpread",
+        type=float,
+        default=0.025,
+        help="Mosaic angular spread in degrees (FWHM). Default is 0.025 degrees.",
+    )
+    sim_params_group.add_argument(
+        "--mosDoms",
+        type=int,
+        default=150,
+        help="Number of mosaic domains to simulate. Default is 150.",
+    )
+    sim_params_group.add_argument(
+        "--div",
+        type=float,
+        default=0,
+        help="Beam divergence in mrad. Default is 0 (no divergence).",
+    )
+    sim_params_group.add_argument(
+        "--divSteps",
+        type=int,
+        default=0,
+        help="Number of divergence steps in x and y directions. Total number of steps is proportional to the square of this value. Default is 0.",
+    )
+    sim_params_group.add_argument(
+        "--enSteps",
+        type=int,
+        default=322,
+        help="Number of spectrum samples. Use to upsample or downsample the provided spectrum file. Default is 322.",
+    )
+    sim_params_group.add_argument(
+        "--oversample",
+        type=int,
+        default=1,
+        help="Pixel oversampling factor. Increase this value if simulated spots appear sharp or aliased. Default is 1.",
+    )
+    sim_params_group.add_argument(
+        "--xtalSize",
+        type=float,
+        default=None,
+        help="Crystal size in mm. If not specified, Nabc will be used to determine crystal size. It's recommended to set either this or Nabc.",
+    )
+    sim_params_group.add_argument(
+        "--Nabc",
+        default=[100, 100, 100],
+        nargs=3,
+        type=float,
+        help="Number of unit cells along a, b, and c axes. Used to determine crystal size if --xtalSize is not set. Format: 'N_a N_b N_c'.",
+    )
+    sim_params_group.add_argument(
+        "--spotScale",
+        default=None,
+        help="Override the crystal size parameter to scale spot intensities directly. Float value. Useful for quick intensity adjustments.",
+        type=float,
+    )
+    sim_params_group.add_argument(
+        "--ksol",
+        default=0.4,
+        type=float,
+        help="Solvent scattering parameter (k_sol) for structure factor calculation. Default is 0.4.",
+    )
+    sim_params_group.add_argument(
+        "--bsol",
+        default=120,
+        type=float,
+        help="Solvent B-factor (b_sol) for structure factor calculation. Default is 120.",
+    )
+    sim_params_group.add_argument(
+        "--waterThick",
+        type=float,
+        default=2.5,
+        help="Thickness of water in mm for background simulation. Default is 2.5 mm.",
+    )
+    sim_params_group.add_argument(
+        "--verbose", action="store_true", help="Enable verbose output during simulation."
+    )
+
+    # Rotation and Image Control Group
+    rot_img_group = parser.add_argument_group("Rotation and Image Control")
+    rot_img_group.add_argument(
+        "--totalDeg",
+        type=float,
+        help="Total amount of crystal rotation in degrees. Default is 180 degrees.",
+        default=180,
+    )
+    rot_img_group.add_argument(
+        "--numimg",
+        type=int,
+        default=180,
+        help="Number of images to simulate over the total rotation range. Default is 180 images for 180 degrees, meaning 1 degree per image.",
+    )
+    rot_img_group.add_argument(
+        "--rotate",
+        action="store_true",
+        help="If set, the crystal will be rotated continuously between exposures, simulating a smeared image within each step (e.g., for rotation method data). If not set, the crystal is static during each exposure.",
+    )
+    rot_img_group.add_argument(
+        "--numPhiSteps",
+        type=int,
+        default=10,
+        help="Number of mini-simulations to perform between phi and phi+delta_phi if --rotate is enabled. Higher values give smoother smearing but increase simulation time significantly.",
+    )
+    rot_img_group.add_argument(
+        "--run",
+        type=int,
+        default=1,
+        help="Run number to be included in output filenames (e.g., shot_R_00001.cbf). Useful for organizing multiple simulation runs. Default is 1.",
+    )
+    rot_img_group.add_argument(
+        "--testShot",
+        action="store_true",
+        help="Simulate only a single shot for quick testing purposes, regardless of --numimg.",
+    )
+
+    # Detector and Output Control Group
+    det_output_group = parser.add_argument_group("Detector and Output Control")
+    det_output_group.add_argument(
+        "--dist",
+        type=float,
+        help="Detector distance in mm from the sample. Default is 200 mm.",
+        default=200,
+    )
+    det_output_group.add_argument(
+        "--gain",
+        default=1,
+        type=float,
+        help="ADU (Analog-to-Digital Unit) per photon. This is a scaling factor applied to the simulated photon counts. Default is 1.",
+    )
+    det_output_group.add_argument(
+        "--calib",
+        default=3,
+        type=float,
+        help="Detector calibration noise percentage. This adds a percentage of the signal as noise. Default is 3 (meaning 3 percent).",
+    )
+    det_output_group.add_argument(
+        "--PSF",
+        default=0,
+        type=float,
+        help="Detector Point Spread Function (PSF) FWHM (Full Width at Half Maximum) in mm. Simulates blurring due to detector response. Default is 0 (no PSF).",
+    )
+    det_output_group.add_argument(
+        "--ADC",
+        default=0,
+        type=float,
+        help="ADC (Analog-to-Digital Converter) offset in ADU. This is a baseline offset added to all pixels. Default is 0.",
+    )
+    det_output_group.add_argument(
+        "--cbf",
+        action="store_true",
+        help="In addition to Nexus output, save a CBF file for each simulated image. CBF files are common for crystallographic data.",
+    )
+    det_output_group.add_argument(
+        "--noWaveImg",
+        action="store_true",
+        help="Do not write the wavelength-per-pixel HDF5 file. This can save disk space if per-pixel wavelength information is not needed.",
+    )
+    det_output_group.add_argument(
+        "--maskFile",
+        type=str,
+        default=None,
+        help="Path to an HDF5 file containing a detector mask. The mask should be a boolean array with dimensions matching the detector image size (e.g., from a previous data collection).",
+    )
+    det_output_group.add_argument(
+        "--maskKey",
+        type=str,
+        default="mask",
+        help="Key within the --maskFile HDF5 file to access the mask dataset. Default is 'mask'.",
+    )
+
+    # Input Data and GPU Group
+    input_gpu_group = parser.add_argument_group("Input Data and GPU Configuration")
+    input_gpu_group.add_argument(
+        "--specFile",
+        default=None,
+        type=str,
+        help="Path to a .lam file (Precoginition format) defining the incident beam spectrum (intensity vs. wavelength). If not provided, a default internal spectrum will be used.",
+    )
+    input_gpu_group.add_argument(
+        "--pdbFile",
+        default=None,
+        type=str,
+        help="Path to a PDB file for structure factor simulation. The structure factors will be calculated from this PDB unless --mtzFile is provided.",
+    )
+    input_gpu_group.add_argument(
+        "--mtzFile",
+        default=None,
+        type=str,
+        help="Path to an MTZ file containing pre-calculated structure factors. This argument supersedes --pdbFile if provided, and is generally faster.",
+    )
+    input_gpu_group.add_argument(
+        "--mtzLabel",
+        default=None,
+        type=str,
+        help="MTZ label pointing to the structure factors within the MTZ file (e.g., 'F(+),SIGF(+)'). Required if --mtzFile is used.",
+    )
+    input_gpu_group.add_argument(
+        "--nitro",
+        action="store_true",
+        help="Simulate nitrogenase-specific spread data. This option will override --pdbFile with a predefined nitrogenase PDB (av1_highres_aom_w_fe_oxstates.pdb).",
+    )
+    input_gpu_group.add_argument(
+        "--rubre",
+        action="store_true",
+        help="Simulate rubredoxin-specific spread data. This option will override --pdbFile with a predefined rubredoxin PDB (1brf.pdb).",
+    )
+    input_gpu_group.add_argument(
+        "--useSpreadData",
+        action="store_true",
+        help="Enable the use of energy-dependent spread data (e.g., for anomalous scattering effects). Typically used in conjunction with --nitro or --rubre.",
+    )
+    input_gpu_group.add_argument(
+        "--mono",
+        action='store_true',
+        help="Perform a monochromatic simulation using the average wavelength of the provided spectrum. This will effectively treat the beam as single-energy and disables spread data if used.",
+    )
+    input_gpu_group.add_argument(
+        "--ndev",
+        type=int,
+        default=1,
+        help="Number of GPU devices per compute node to utilize for parallel simulation. Default is 1.",
+    )
+    input_gpu_group.add_argument(
+        "--cuda",
+        action="store_true",
+        help="Set the DIFFBRAGG_USE_CUDA=1 environment variable to explicitly force running the CUDA kernel for simulations. Requires a CUDA-compatible GPU and DiffBragg compiled with CUDA support.",
+    )
+
+    # Crystal Splitting Group (for two-domain simulations)
+    split_group = parser.add_argument_group("Crystal Splitting Parameters (for two-domain simulations)")
+    split_group.add_argument(
+        "--splitPhiStart",
+        type=float,
+        default=-1,
+        help="Start of the rotation range (in degrees) where a second crystal domain will be simulated. Set to -1 to disable crystal splitting. (inclusive)",
+    )
+    split_group.add_argument(
+        "--splitPhiEnd",
+        type=float,
+        default=-1,
+        help="End of the rotation range (in degrees) where a second crystal domain will be simulated. Set to -1 to disable crystal splitting. (inclusive)",
+    )
+    split_group.add_argument(
+        "--splitRotAxis",
+        type=float,
+        nargs =3,
+        default=[1,0,0],
+        help="Rotation axis (x,y,z comma-separated values, e.g., '1 0 0' or '0.5 0.5 0') for the second crystal domain. This rotation is applied *once* to the second crystal's initial orientation relative to the main crystal.",
+    )
+    split_group.add_argument(
+        "--splitRotAngle",
+        type=float,
+        default=0.1,
+        help="Rotation angle (in degrees) for the second crystal domain, applied about --splitRotAxis relative to the main crystal. Default is 0.1 degrees.",
+    )
+    split_group.add_argument(
+        "--splitScale",
+        type=float,
+        default=0.5,
+        help="Intensity scale factor (0 to 1) for the second crystal domain relative to the main crystal. For example, 0.5 means the second domain contributes half the intensity of the first. Default is 0.5.",
+    )
+
     args = parser.parse_args()
+
 
     import os
     import time
