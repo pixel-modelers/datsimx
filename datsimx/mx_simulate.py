@@ -5,7 +5,7 @@ def main():
     parser = ArgumentParser(
         formatter_class=ArgumentDefaultsHelpFormatter,
         description="""Generate diffraction images and save them as Nexus master files.
-Optionally, an HDF5 file containing per-pixel wavelengths will be written unless --noWaveImg is specified.
+Optionally, an HDF5 file containing per-pixel wavelengths will be written if --waveImg is specified.
 
         """,
         epilog="""
@@ -116,15 +116,15 @@ python mx_simulate.py my_output_directory_split --numimg 180 --splitPhiStart 45 
         help="Number of images to simulate over the total rotation range. Default is 180 images for 180 degrees, meaning 1 degree per image.",
     )
     rot_img_group.add_argument(
-        "--rotate",
+        "--static",
         action="store_true",
-        help="If set, the crystal will be rotated continuously between exposures, simulating a smeared image within each step (e.g., for rotation method data). If not set, the crystal is static during each exposure.",
+        help="If set, the crystal will be still during exposure, simulating a fixed target or serial diffraction image. If not set, the crystal is rotated during each exposure.",
     )
     rot_img_group.add_argument(
         "--numPhiSteps",
         type=int,
         default=10,
-        help="Number of mini-simulations to perform between phi and phi+delta_phi if --rotate is enabled. Higher values give smoother smearing but increase simulation time significantly.",
+        help="Number of mini-simulations to perform between phi and phi+delta_phi. Higher values give smoother smearing but increase simulation time significantly.",
     )
     rot_img_group.add_argument(
         "--run",
@@ -176,14 +176,19 @@ python mx_simulate.py my_output_directory_split --numimg 180 --splitPhiStart 45 
         help="In addition to Nexus output, save a CBF file for each simulated image. The CBF file will lack goniometer information though and therefore will not work with XDS.",
     )
     det_output_group.add_argument(
-        "--noWaveImg",
+        "--waveImg",
         action="store_true",
-        help="Do not calculate the wavelength-per-pixel. This can speed up simulation and save disk space if per-pixel wavelength information is not needed.",
+        help="Calculate the wavelength-per-pixel and write to the output files. The output nexus master file then contain additional information at the root level, wave_data, h_data, k_data, l_data for wavelength, and fractional miller indices, per pixel.",
     )
     det_output_group.add_argument(
         "--eigerMask",
         action="store_true",
         help="if True, simulate onto an Eiger panel geometry. Pixels in gaps between Eiger panels will be set to -1.",
+    )
+    det_output_group.add_argument(
+        "--noNoise",
+        action="store_true",
+        help="If set, a single background file will be stored separately and no noise will be added to the output images. This significantly reduces file size but requires the user to manually add noise and background for a full simulation."
     )
 
     # Input Data and GPU Group
@@ -300,7 +305,6 @@ wget https://raw.githubusercontent.com/dermen/e080_laue/master/from_vukica.lam""
     from scitbx.matrix import col, sqr
     from scitbx.array_family import flex
     from dxtbx.model import Experiment, ExperimentList
-    import dxtbx
 
     from datsimx import make_nexus
     from datsimx.fcalcs import fcalc, db_anom_inputs
@@ -349,7 +353,7 @@ wget https://raw.githubusercontent.com/dermen/e080_laue/master/from_vukica.lam""
     MASK = np.ones((4362, 4148)).astype(bool)
     if args.eigerMask:
         mask_file = os.path.join(this_dir, "eiger_mask.hdf5")
-        MASK = h5py.File(mask_file, "r")[args.maskKey][()]
+        MASK = h5py.File(mask_file, "r")["mask"][()]
         assert MASK.shape==(4362, 4148)
 
     if args.specFile is not None:
@@ -467,151 +471,155 @@ wget https://raw.githubusercontent.com/dermen/e080_laue/master/from_vukica.lam""
     device_Id = COMM.rank % args.ndev
     tsims = []
 
-    saved_h5s = []
+    # get nimage per rank
+    h5_name = os.path.join(args.outdir, "shots_%d_rank%d.h5" % (args.run, COMM.rank))
+    with h5py.File(h5_name, 'w') as h:
 
-    for i_shot in range(args.numimg):
+        for i_shot in range(args.numimg):
 
-        if i_shot % COMM.size != COMM.rank:
-            continue
-        tsim = time.time()
-        print("Doing shot %d/%d" % (i_shot+1, args.numimg))
-        current_phi_deg = delta_phi*i_shot*180/np.pi
-        Rphi = gonio_axis.axis_and_angle_as_r3_rotation_matrix(delta_phi*i_shot, deg=False)
-        Uphi = Rphi * U0
-        CRYSTAL.set_U(Uphi)
+            if i_shot % COMM.size != COMM.rank:
+                continue
+            tsim = time.time()
+            print("Doing shot %d/%d" % (i_shot+1, args.numimg))
+            current_phi_deg = delta_phi*i_shot*180/np.pi
+            Rphi = gonio_axis.axis_and_angle_as_r3_rotation_matrix(delta_phi*i_shot, deg=False)
+            Uphi = Rphi * U0
+            CRYSTAL.set_U(Uphi)
 
-        t = time.time()
+            t = time.time()
 
-        printout_pix=None
-        from simtbx.diffBragg.device import DeviceWrapper
-        with DeviceWrapper(device_Id) as _:
+            printout_pix=None
+            from simtbx.diffBragg.device import DeviceWrapper
+            with DeviceWrapper(device_Id) as _:
 
-            verbose = False
-            if args.verbose:
-                verbose = COMM.rank==0
-            out = diffBragg_forward(
-                CRYSTAL, DETECTOR, BEAM, Fcalc, energies, fluxes,
-                oversample=args.oversample, Ncells_abc=Nabc,
-                mos_dom=num_mos, mos_spread=mos_spread, beamsize_mm=beam_size_mm,
-                device_Id=device_Id,
-                show_params=False, crystal_size_mm=args.xtalSize, printout_pix=printout_pix,
-                verbose=verbose, default_F=0, interpolate=0,
-                mosaicity_random_seeds=None, div_mrad=args.div,
-                divsteps=args.divSteps,
-                spot_scale_override=args.spotScale,
-                show_timings=verbose,
-                nopolar=False, diffuse_params=None,
-                delta_phi=delta_phi*180/np.pi if args.rotate else None,
-                num_phi_steps = args.numPhiSteps if args.rotate else 1,
-                perpixel_wavelen=not args.noWaveImg,
-                spread_data=spread_data)
+                verbose = False
+                if args.verbose:
+                    verbose = COMM.rank==0
+                out = diffBragg_forward(
+                    CRYSTAL, DETECTOR, BEAM, Fcalc, energies, fluxes,
+                    oversample=args.oversample, Ncells_abc=Nabc,
+                    mos_dom=num_mos, mos_spread=mos_spread, beamsize_mm=beam_size_mm,
+                    device_Id=device_Id,
+                    show_params=False, crystal_size_mm=args.xtalSize, printout_pix=printout_pix,
+                    verbose=verbose, default_F=0, interpolate=0,
+                    mosaicity_random_seeds=None, div_mrad=args.div,
+                    divsteps=args.divSteps,
+                    spot_scale_override=args.spotScale,
+                    show_timings=verbose,
+                    nopolar=False, diffuse_params=None,
+                    delta_phi=delta_phi*180/np.pi if not args.static else None,
+                    num_phi_steps = args.numPhiSteps if not args.static else 1,
+                    perpixel_wavelen=args.waveImg,
+                    spread_data=spread_data)
 
-        if args.noWaveImg:
-            img = out
-            wave_img = h_img = k_img = l_img = None
-        else:
-            img, wave_img, h_img, k_img, l_img = out
-
-        # Simulate for the second crystal if within the split range
-        img_split = np.zeros(img_sh, dtype=np.float32)
-        if CRYSTAL2 and args.splitPhiStart <= current_phi_deg <= args.splitPhiEnd:
-            Uphi2 = Rphi * U0_2 # Apply the same rotation to the second crystal's initial U-matrix
-            CRYSTAL2.set_U(Uphi2)
-
-            print(f"  --> Simulating split crystal for shot {i_shot+1} (phi={current_phi_deg:.2f} deg)")
-            out2 = diffBragg_forward(
-                CRYSTAL2, DETECTOR, BEAM, Fcalc, energies, fluxes, # Use same Fcalc, energies, fluxes
-                oversample=args.oversample, Ncells_abc=Nabc,
-                mos_dom=num_mos, mos_spread=mos_spread, beamsize_mm=beam_size_mm,
-                device_Id=device_Id,
-                show_params=False, crystal_size_mm=args.xtalSize, printout_pix=printout_pix,
-                verbose=verbose, default_F=0, interpolate=0,
-                mosaicity_random_seeds=None, div_mrad=args.div,
-                divsteps=args.divSteps,
-                spot_scale_override=args.spotScale,
-                show_timings=verbose,
-                nopolar=False, diffuse_params=None,
-                delta_phi=delta_phi*180/np.pi if args.rotate else None,
-                num_phi_steps = args.numPhiSteps if args.rotate else 1,
-                perpixel_wavelen=False, # Only want wave_img from the main crystal
-                spread_data=spread_data)
-            img2 = out2
-
-            #if len(img2.shape)==3:
-            #    img2 = img2[0]
-            img_split = img2 * args.splitScale # Apply scaling to the split component
-
-        img = img + img_split # Combine images from both crystals 
-
-
-        t = time.time()-t
-        print("Took %.4f sec to sim" % t)
-        if len(img.shape)==3:
-            img = img[0]
-            if wave_img is not None:
-                wave_img = wave_img[0]
-                h_img = h_img[0]
-                k_img = k_img[0]
-                l_img = l_img[0]
-
-        bg_only = water_bkgrnd+air
-
-        img_with_bg = img +water_bkgrnd + air
-
-        SIM = nanoBragg(detector=DETECTOR, beam=BEAM)
-        SIM.beamsize_mm = beam_size_mm
-        SIM.exposure_s = 1
-        SIM.flux = total_flux
-        SIM.adc_offset_adu = args.ADC
-        SIM.detector_psf_kernel_radius_pixels = 5
-        SIM.detector_calibration_noice_pct = args.calib
-        SIM.detector_psf_fwhm_mm = args.PSF
-        SIM.quantum_gain = args.gain
-        SIM.readout_noise_adu = 3
-        SIM.raw_pixels += flex.double((img_with_bg).ravel())
-        SIM.add_noise()
-        if args.cbf:
-            cbf_name = os.path.join(args.outdir, "shot_%d_%05d.cbf" % (args.run, i_shot+1))
-            SIM.to_cbf(cbf_name, cbf_int=True)
-        
-        noise_image = SIM.raw_pixels.as_numpy_array()
-        noise_image[ ~MASK] = -1
-        
-        h5_name = os.path.join(args.outdir, "shot_%d_%05d.h5" % (args.run, i_shot+1))
-        #SIM.to_cbf(cbf_name, cbf_int=True)
-        #img = SIM.raw_pixels.as_numpy_array().reshape(img_sh)
-        SIM.free_all()
-        del SIM
-        #h5_name = cbf_name.replace(".cbf", ".h5")
-        h = h5py.File(h5_name, "w")
-        if wave_img is not None:
-            h.create_dataset("wave_data", data=wave_img, dtype=np.float32, compression="lzf")
-            h.create_dataset("h_data", data=h_img, dtype=np.float32, compression="lzf")
-            h.create_dataset("k_data", data=k_img, dtype=np.float32, compression="lzf")
-            h.create_dataset("l_data", data=l_img, dtype=np.float32, compression="lzf")
-        h.create_dataset("noise_image", data=noise_image.astype(np.float32))
-        h.create_dataset("delta_phi", data=delta_phi)
-        h.create_dataset("Umat", data=CRYSTAL.get_U())
-        if CRYSTAL2 is not None:
-            if args.splitPhiStart <= current_phi_deg <= args.splitPhiEnd:
-                h.create_dataset("Umat_split", data=CRYSTAL2.get_U())
+            if not args.waveImg:
+                img = out
+                wave_img = h_img = k_img = l_img = None
             else:
-                h.create_dataset("Umat_split", data=(1,0,0,0,1,0,0,0,1))
+                img, wave_img, h_img, k_img, l_img = out
 
-        h.create_dataset("Bmat", data=CRYSTAL.get_B())
-        h.create_dataset("mos_spread", data=mos_spread)
-        #h.create_dataset("img_with_bg", data=img_with_bg)
-        h.close()
-        saved_h5s.append(h5_name)
-        tsim = time.time()-tsim
-        if COMM.rank==0:
-            print("TSIM=%f" % tsim)
-        tsims.append(tsim)
-        if args.testShot:
-            break
+            # Simulate for the second crystal if within the split range
+            img_split = np.zeros(img_sh, dtype=np.float32)
+            if CRYSTAL2 and args.splitPhiStart <= current_phi_deg <= args.splitPhiEnd:
+                Uphi2 = Rphi * U0_2 # Apply the same rotation to the second crystal's initial U-matrix
+                CRYSTAL2.set_U(Uphi2)
+
+                print(f"  --> Simulating split crystal for shot {i_shot+1} (phi={current_phi_deg:.2f} deg)")
+                out2 = diffBragg_forward(
+                    CRYSTAL2, DETECTOR, BEAM, Fcalc, energies, fluxes, # Use same Fcalc, energies, fluxes
+                    oversample=args.oversample, Ncells_abc=Nabc,
+                    mos_dom=num_mos, mos_spread=mos_spread, beamsize_mm=beam_size_mm,
+                    device_Id=device_Id,
+                    show_params=False, crystal_size_mm=args.xtalSize, printout_pix=printout_pix,
+                    verbose=verbose, default_F=0, interpolate=0,
+                    mosaicity_random_seeds=None, div_mrad=args.div,
+                    divsteps=args.divSteps,
+                    spot_scale_override=args.spotScale,
+                    show_timings=verbose,
+                    nopolar=False, diffuse_params=None,
+                    delta_phi=delta_phi*180/np.pi if not args.static else None,
+                    num_phi_steps = args.numPhiSteps if not args.static else 1,
+                    perpixel_wavelen=False, # Only want wave_img from the main crystal
+                    spread_data=spread_data)
+                img2 = out2
+
+                # Apply scaling to the split component
+                img_split = img2 * args.splitScale
+
+            # Combine images from both crystals
+            img = img + img_split
+
+            t = time.time()-t
+            print("Took %.4f sec to sim" % t)
+            if len(img.shape)==3:
+                img = img[0]
+                if wave_img is not None:
+                    wave_img = wave_img[0]
+                    h_img = h_img[0]
+                    k_img = k_img[0]
+                    l_img = l_img[0]
+
+            bg_only = water_bkgrnd+air
+
+            img_with_bg = img + bg_only
+
+            SIM = nanoBragg(detector=DETECTOR, beam=BEAM)
+            SIM.beamsize_mm = beam_size_mm
+            SIM.exposure_s = 1
+            SIM.flux = total_flux
+            SIM.adc_offset_adu = args.ADC
+            SIM.detector_psf_kernel_radius_pixels = 5
+            SIM.detector_calibration_noice_pct = args.calib
+            SIM.detector_psf_fwhm_mm = args.PSF
+            SIM.quantum_gain = args.gain
+            SIM.readout_noise_adu = 3
+            SIM.raw_pixels += flex.double((img_with_bg).ravel())
+            if not args.noNoise:
+                SIM.add_noise()
+            if args.cbf:
+                cbf_name = os.path.join(args.outdir, "shot_%d_%05d.cbf" % (args.run, i_shot+1))
+                SIM.to_cbf(cbf_name, cbf_int=True)
+
+            if args.noNoise:
+                output_image = img
+                if COMM.rank==0 and i_shot==0:
+                    bg_h5_name = os.path.join(args.outdir, "background_%d.h5" % (args.run,))
+                    bg_only[~MASK] = -1
+                    with h5py.File(bg_h5_name, "w") as bg_h:
+                        bg_h.create_dataset("background", data=bg_only, compression="gzip", compression_opts=4,
+                                            shuffle=True)
+            else:
+                output_image = SIM.raw_pixels.as_numpy_array()
+            output_image[~MASK] = -1
+
+            SIM.free_all()
+            del SIM
+            shot_name = "shot_%d_%05d" %(args.run, i_shot+1)
+            if wave_img is not None:
+                h.create_dataset(f"wave_data/{shot_name}", data=wave_img, dtype=np.float32, compression="lzf")
+                h.create_dataset(f"h_data/{shot_name}", data=h_img, dtype=np.float32, compression="lzf")
+                h.create_dataset(f"k_data/{shot_name}", data=k_img, dtype=np.float32, compression="lzf")
+                h.create_dataset(f"l_data/{shot_name}", data=l_img, dtype=np.float32, compression="lzf")
+            h.create_dataset(f"sim_image/{shot_name}", data=output_image.astype(np.float32), dtype=np.float32,
+                             compression="gzip", compression_opts=4, shuffle=True)
+            h.create_dataset(f"delta_phi/{shot_name}", data=delta_phi)
+            h.create_dataset(f"Umat/{shot_name}", data=CRYSTAL.get_U())
+            if CRYSTAL2 is not None:
+                if args.splitPhiStart <= current_phi_deg <= args.splitPhiEnd:
+                    h.create_dataset(f"Umat_split/{shot_name}", data=CRYSTAL2.get_U())
+                else:
+                    h.create_dataset(f"Umat_split/{shot_name}", data=(1,0,0,0,1,0,0,0,1))
+
+            h.create_dataset(f"Bmat/{shot_name}", data=CRYSTAL.get_B())
+            h.create_dataset(f"mos_spread/{shot_name}", data=mos_spread)
+            tsim = time.time()-tsim
+            if COMM.rank==0:
+                print("TSIM=%f" % tsim)
+            tsims.append(tsim)
+            if args.testShot:
+                break
 
     tsims = COMM.reduce(tsims)
-    saved_h5s = COMM.reduce(saved_h5s)
     if COMM.rank==0:
         ave_tsim = np.median(tsims)
         print("Done", flush=True)
