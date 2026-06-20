@@ -3,6 +3,9 @@
 # Original command for making mono sims
 datsimx.sim mono_1ksims --numimg 1000 --cuda --mono --oversample 1 --mosDoms 1 --ndev 4 --randomizerot
 
+# script to run DIALS (the most recent one from BASH history)
+mpirun -n 64 dials.stills_process  mono_1ksims/run_1_master.h5 dispatch.index=False output.strong_filename="%s_strong.refl" output.experiments_filename="%s_strong.expt"  mp.method=mpi output_dir=mono_1ksims/proc
+
 # script used to make the training data file
 mpirun  -n 64 python datsimx/mlat_combine.py  "mono_1ksims/proc/*strong.refl" mono_1ksims/train_masks.h5
 
@@ -15,6 +18,9 @@ python datsimx/ml_sep/train.py  mono_1ksims/train_masks.h5 ml_test.h5 sep_mlatts
 
 # original command for making poly sims
 datsimx.sim poly_sims --numimg 100 --cuda --oversample 1 --mosDoms 1 --ndev 4 --randomizerot
+
+# script to run DIALS (the most recent one from BASH history)
+mpirun -n 32 dials.stills_process  poly_sims/run_1_master.h5 dispatch.index=False output.strong_filename="%s_strong.refl" output.experiments_filename="%s_strong.expt"  mp.method=mpi output_dir=poly_sims/proc
 
 # script used to combine the wavelength data
 mpirun -n 4 python datsimx/wave_combine.py  "poly_sims_test/proc/*strong.refl" poly_sims_test/test_masks.h5
