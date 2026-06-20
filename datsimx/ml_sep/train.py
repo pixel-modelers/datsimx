@@ -54,7 +54,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from datsimx.ml_sep.unet import unet_model
+#from datsimx.ml_sep.unet import unet_model
 from datsimx.ml_sep.dset_loader import WaveData, MlatData, NlattsData
 from datsimx.ml_sep.arch import predictMulti
 from datsimx.ml_sep import arch
@@ -75,8 +75,6 @@ def dice_loss(pred, lab, reduction="mean"):
         dloss = dloss.mean()
     return dloss
 
-#def one_to_one_dice_loss(pred, lab, reduction="mean"):
-
 class diceLoss(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -84,25 +82,16 @@ class diceLoss(torch.nn.Module):
         numer = (pred[:,0]*lab[:,0]).sum(axis=-1).sum(axis=-1)
         denom= pred[:,0].sum(axis=-1).sum(axis=-1) + lab[:,0].sum(axis=-1).sum(axis=-1)
         dloss = 1-2*numer/denom
-        #if reduction == "mean":
         dloss = dloss.mean()
         return dloss
 
-from torchvision.models.segmentation import fcn_resnet50
-from torch import nn
-class FCN50(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.model = fcn_resnet50(num_classes=1)
-        self.model.backbone.conv1 = \
-                torch.nn.Conv2d(1, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
-        self.sig = nn.Sigmoid()
-
-    def forward(self, x):
-        x = self.model(x)['out']
-        x = self.sig(x)
-        return x
-    
+def one_to_one_dice_loss(pred, lab, reduction="mean"):
+    numer = (pred[:,0]*lab[:,0]).sum(axis=-1).sum(axis=-1)
+    denom= pred[:,0].sum(axis=-1).sum(axis=-1) + lab[:,0].sum(axis=-1).sum(axis=-1)
+    dloss = 1-2*numer/denom
+    if reduction == "mean":
+        dloss = dloss.mean()
+    return dloss
 
 from itertools import permutations
 class Loss(torch.nn.Module):
@@ -195,10 +184,11 @@ elif args.goal == "sepMulti":
 else:
     #model = arch.resnetU()
     #model = torch.nn.Sequential(model, sig)
-    model = FCN50()
-    
+    #model = FCN50()
+    model = arch.FCN50()
+
     train_data = WaveData(args.trainf)
-    test_data = WaveData(args.testf) 
+    test_data = WaveData(args.testf,250) 
     val_data = WaveData(args.trainf, maximg=len(test_data))
 
     loss = diceLoss() #one_to_one_dice_loss 

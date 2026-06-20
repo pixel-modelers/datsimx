@@ -8,7 +8,7 @@ import numpy as np
 
 
 
-def make_nexus(folder, run, total_deg=180):
+def make_nexus(folder, run, total_deg=180, swap=True):
     """
     folder is a datsimx.sim output folder, 
     and run is an integer run number (args.run argument to sim_laue_basic)
@@ -83,6 +83,10 @@ def make_nexus(folder, run, total_deg=180):
     thick_dset = det.create_dataset("sensor_thickness", data=0.00032)
     thick_dset.attrs["units"] = "m"
     det.create_dataset("sensor_material", data="Si", dtype=dt)
+    #if swap:
+    #    xdim_dset = detspec.create_dataset("x_pixels_in_detetector", data=ydim)
+    #    ydim_dset = detspec.create_dataset("y_pixels_in_detetector", data=xdim)
+    #else:
     xdim_dset = detspec.create_dataset("x_pixels_in_detetector", data=xdim)
     ydim_dset = detspec.create_dataset("y_pixels_in_detetector", data=ydim)
     xdim_dset.attrs["units"] = "pixels"
@@ -127,7 +131,7 @@ def make_nexus(folder, run, total_deg=180):
         fast.attrs[k] = val_x
         slow.attrs[k] = val_y
     eiger.create_dataset("data_origin", data=[0,0])
-    eiger.create_dataset("data_size", data=[int(xdim), int(ydim)])
+    eiger.create_dataset("data_size", data=[int(ydim), int(xdim)])
     h.close()
     print(f"Wrote file {master_file}.")
 

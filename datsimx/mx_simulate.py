@@ -28,10 +28,16 @@ def main():
     parser.add_argument("--gain", default=1, type=float, help="ADU per photon")
     parser.add_argument("--cuda", action="store_true", help="set DIFFBRAGG_USE_CUDA=1 env var to run CUDA kernel")
     parser.add_argument("--rotate", action="store_true", help="rotate the crystal between exposures")
+    parser.add_argument("--distance", default=200, help="sample to detector distance in mm", type=float)
     parser.add_argument("--numPhiSteps", type=int, default=10, help="number of mini-simulations to do between phi and phi+delta_phi if args.rotate is True")
     parser.add_argument("--totalDeg", type=float, help="total amount of crystal roataion in degrees (default=180)", default=180)
+    parser.add_argument("--specFile", type=str, help="two column spec file (wavelengths_angstrom, intensities)", default=None)
+    parser.add_argument("--pdbFile", type=str, help="PDB file for structure factor simulation")
     parser.add_argument("--cbf", action="store_true", help="In addition to nexus, save a CBF file for each image simulated")
     parser.add_argument("--randomizerot", action="store_true",help="randomize the rotation of each shot, in which case totalDeg is irrelevant")
+    parser.add_argument("--geom", type=str, help="detector model (eiger, pilatus, or rayonix)", choices=["eiger", "piltatus", "rayonix"])
+    parser.add_argument("--centerShift", nargs=2, type=float, help="apply center shift in pixels (fast-scan, slow-scan), default=(0,0)", default=[0,0])
+    parser.add_argument("--beamStopRad", type=float, default=7.5, help="beam stop mask radius in mm")
     args = parser.parse_args()
 
     import os
@@ -52,8 +58,8 @@ def main():
     from scitbx.array_family import flex
     from dxtbx.model import Experiment, ExperimentList
 
-
     from datsimx import make_nexus
+    from datsimx import det_and_mask
 
     if args.cuda:
         os.environ["DIFFBRAGG_USE_CUDA"] = "1"
@@ -62,8 +68,16 @@ def main():
 
     # convenience files from this repository
     this_dir = os.path.dirname(__file__)
-    spec_file = os.path.join(this_dir, 'from_vukica.lam')  # intensity vs wavelength
-    pdb_file = os.path.join(this_dir, '7lvc.pdb')
+    if args.specFile is None:
+        spec_file = os.path.join(this_dir, 'from_vukica.lam')  # intensity vs wavelength
+    else:
+        spec_file = args.specFile 
+
+    if args.pdbFile is None:
+        pdb_file = os.path.join(this_dir, '7lvc.pdb')
+    else:
+        pdb_file = args.pdbFile
+
     air_name = os.path.join(this_dir, 'air.stol')
     total_flux=5e9
     beam_size_mm=0.01
@@ -77,15 +91,7 @@ def main():
             o.write(cmd+"\n")
     COMM.barrier()
 
-    # Rayonix model
-    DETECTOR = DetectorFactory.simple(
-        sensor='PAD',
-        distance=200,  # mm
-        beam_centre=(170, 170),  # mm
-        fast_direction='+x',
-        slow_direction='-y',
-        pixel_size=(.08854, .08854),  # mm
-        image_size=(3840, 3840))
+    DETECTOR, MASK = det_and_mask.load(args.geom, args.distance, *args.centerShift)
 
     try:
         weights, energies = db_utils.load_spectra_file(spec_file)
@@ -102,6 +108,16 @@ def main():
     ave_wave = utils.ENERGY_CONV / ave_en
 
     BEAM = BeamFactory.simple(ave_wave)
+    
+    pixsize = DETECTOR[0].get_pixel_size()[0]
+    beamstop_rad = int(args.beamStopRad/pixsize)
+    # jitter the beamstop center by 0.5 mm
+    cent_x, cent_y = DETECTOR[0].get_beam_centre_px(BEAM.get_unit_s0())
+    xdim, ydim = DETECTOR[0].get_image_size()
+    Y,X = np.indices((ydim, xdim))
+    pixR = np.sqrt((X - cent_x) ** 2 + (Y - cent_y) ** 2)
+    is_in_beamstop = pixR < beamstop_rad
+    MASK = np.logical_and( MASK, ~is_in_beamstop)
 
     Fcalc = db_utils.get_complex_fcalc_from_pdb(pdb_file, wavelength=ave_wave) #, k_sol=-0.8, b_sol=120) #, k_sol=0.8, b_sol=100)
     Famp = Fcalc.as_amplitude_array()
@@ -134,6 +150,7 @@ def main():
     print("unit cell, space group:\n", Famp, "\n")
 
     ucell = Famp.unit_cell()
+    sgnum = sg.info().type().number()
     Breal = ucell.orthogonalization_matrix()
     # real space vectors
     a = Breal[0], Breal[3], Breal[6]
@@ -180,7 +197,6 @@ def main():
         if args.randomizerot:
             Uphi = sqr(Rotation.random(1, random_states[i_shot]).as_matrix().ravel())
         CRYSTAL.set_U(Uphi)
-
 
         t = time.time()
 
@@ -253,12 +269,19 @@ def main():
             h.create_dataset("k_data", data=k_img, dtype=np.float32, compression="lzf")
             h.create_dataset("l_data", data=l_img, dtype=np.float32, compression="lzf")
         h.create_dataset("noise_image", data=noise_image.astype(np.float32))
+        h.create_dataset("MASK", data=MASK.astype(bool), compression="lzf")
         h.create_dataset("delta_phi", data=delta_phi)
         h.create_dataset("Umat", data=CRYSTAL.get_U())
         h.create_dataset("Bmat", data=CRYSTAL.get_B())
         h.create_dataset("mos_spread", data=mos_spread)
         h.create_dataset("energies", data=energies)
         h.create_dataset("fluxes", data=fluxes)
+        h.create_dataset("distance", data=args.distance)
+        h.create_dataset("pixsize", data=pixsize)
+        h.create_dataset("center", data=[cent_x, cent_y])
+        h.create_dataset("ucvol", data=ucell.volume())
+        h.create_dataset("ucpar", data=ucell.parameters())
+        h.create_dataset("sgnum", data=sgnum)
         #h.create_dataset("img_with_bg", data=img_with_bg)
         h.close()
         saved_h5s.append(h5_name)
