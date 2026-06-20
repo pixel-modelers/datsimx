@@ -74,51 +74,31 @@ class MlatData(Dataset):
 
         self.n_ex = n_ex
         self.mlat_chance = mlat_chance
-
-        # n choose 2:
-        #max_examples = math.comb(self.n_im, 2)
+        self.max_lat = 3
 
     def __len__(self):
         return self.n_ex
 
     def __getitem__(self, idx):
         assert idx < len(self)  # doesnt really matter .. 
-        nlat = 2
-        inds = np.random.choice(self.n_im, size=nlat, replace=False)
 
-        #if np.random.random() < self.mlat_chance:
-        #    #nlat = np.random.choice([2,3])
-        #    nlat = 2
-        #else:
-        #    nlat = 1
-        #    inds = [np.random.choice(self.n_im)]
-        #label = np.zeros((1,self.ydim,self.xdim), int)
-        #combined = np.zeros(label.shape, bool)
-        #for i_ind,ind in enumerate(inds):
-        #    #mask = self.h5['masks'][ind]
-        #    combined = np.logical_or(combined , mask)
-        #    #label[mask[None]] = i_ind+1
+        if np.random.random() < self.mlat_chance:
+            nlat = np.random.choice(list(range(2, self.max_lat+1)))
+            inds = list(np.random.choice(self.n_im, size=nlat, replace=False))
+        else:
+            nlat = 1
+            inds = [np.random.choice(self.n_im)]
+        while len(inds) < self.max_lat:
+            inds += inds
+        inds = inds[:self.max_lat]
 
         masks = [self.h5["masks"][ind] for ind in inds]
-        #else:
-        #    ind1 = np.random.choice(self.n_im)
-        #    mask1 = self.h5['masks'][ind1]
-        #    mask2 = np.zeros_like(mask1)
-        #    masks = mask1, mask2 
-        #    masks = np.random.permutation(masks)
 
-        combined = np.any(masks, axis=0)[None] #.astype(np.float32)
+        combined = np.any(masks, axis=0)[None]
         combined = torch.tensor(combined.astype(np.float32))
 
         label = np.array(masks).astype(np.float32)
         label = torch.tensor(label)
-        #if nlat < 5:
-        #    if nlat  in [3,4]:
-        #        label = torch.cat( (label, label[:(5-nlat)]), axis=0)
-        #    elif nlat == 1:
-        #        label = torch.cat( (label, label, label, label, label), axis=0)
-        #    else:
-        #        label = torch.cat( (label, label, label[:1]), axis=0)
         return combined, label
 
 

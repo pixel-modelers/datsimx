@@ -64,25 +64,44 @@ logger = get_logger(logname)
 
 def dice_loss(pred, lab, reduction="mean"):
     """ checks if `pred` lattice is any of the `lab` lattices.. we only want model to separate one lattice at a time"""
-
     pred_rep = pred.repeat((1,lab.shape[1],1,1))
     numer = (pred_rep*lab).sum(axis=-1).sum(axis=-1)
     denom= pred_rep.sum(axis=-1).sum(axis=-1) + lab.sum(axis=-1).sum(axis=-1)
     dice_metric = 1-(2*numer)/(denom)
     dloss = torch.min(dice_metric, axis=-1).values
-    if torch.sum(dloss < 0) > 0:
-        from IPython import embed;embed()
+    #if torch.sum(dloss < 0) > 0:
+    #    from IPython import embed;embed()
     if reduction == "mean":
         dloss = dloss.mean()
     return dloss
 
-def one_to_one_dice_loss(pred, lab, reduction="mean"):
-    numer = (pred[:,0]*lab[:,0]).sum(axis=-1).sum(axis=-1)
-    denom= pred[:,0].sum(axis=-1).sum(axis=-1) + lab[:,0].sum(axis=-1).sum(axis=-1)
-    dloss = 1-2*numer/denom
-    if reduction == "mean":
+#def one_to_one_dice_loss(pred, lab, reduction="mean"):
+
+class diceLoss(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+    def forward(self, pred, lab):
+        numer = (pred[:,0]*lab[:,0]).sum(axis=-1).sum(axis=-1)
+        denom= pred[:,0].sum(axis=-1).sum(axis=-1) + lab[:,0].sum(axis=-1).sum(axis=-1)
+        dloss = 1-2*numer/denom
+        #if reduction == "mean":
         dloss = dloss.mean()
-    return dloss
+        return dloss
+
+from torchvision.models.segmentation import fcn_resnet50
+from torch import nn
+class FCN50(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.model = fcn_resnet50(num_classes=1)
+        self.model.backbone.conv1 = \
+                torch.nn.Conv2d(1, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
+        self.sig = nn.Sigmoid()
+
+    def forward(self, x):
+        x = self.model(x)['out']
+        x = self.sig(x)
+        return x
     
 
 from itertools import permutations
@@ -157,8 +176,9 @@ elif args.goal == "sepMulti":
             else:
                 train_params.append(p)
     else:
-        model = arch.resnetU()
-        model = torch.nn.Sequential(model, sig)
+        model = FCN50()
+        #model = arch.resnetU()
+        #model = torch.nn.Sequential(model, sig)
         train_params = model.parameters()
 
     if args.adam:
@@ -173,14 +193,15 @@ elif args.goal == "sepMulti":
     loss =dice_loss 
 
 else:
-    model = arch.resnetU()
-    model = torch.nn.Sequential(model, sig)
-
+    #model = arch.resnetU()
+    #model = torch.nn.Sequential(model, sig)
+    model = FCN50()
+    
     train_data = WaveData(args.trainf)
     test_data = WaveData(args.testf) 
     val_data = WaveData(args.trainf, maximg=len(test_data))
 
-    loss = one_to_one_dice_loss 
+    loss = diceLoss() #one_to_one_dice_loss 
     if args.adam:
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     else:

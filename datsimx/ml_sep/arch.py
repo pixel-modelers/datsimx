@@ -1,7 +1,21 @@
 
 import torch
 from torch import nn
+from torchvision.models.segmentation import fcn_resnet50
 
+
+class FCN50(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.model = fcn_resnet50(num_classes=1)
+        self.model.backbone.conv1 = \
+                torch.nn.Conv2d(1, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
+        self.sig = nn.Sigmoid()
+
+    def forward(self, x):
+        x = self.model(x)['out']
+        x = self.sig(x)
+        return x
     
 def pad_from_ks(ks):
     return int(round(ks/2))-1
@@ -139,7 +153,7 @@ class resnetU(nn.Module):
                          (1024,2048,1024),
                          (512,1024,512),
                          (256,512,256)]
-        inv_Nmores = [2,5,3,2]
+        inv_Nmores = [1,1,1,1] #2,5,3,2]
 
         inv_channel_dims = 2048, 1024, 512, 256
         for i_dim, (Nmore, bl_arg) in enumerate(zip(inv_Nmores, inv_block_args)):
@@ -159,15 +173,15 @@ class resnetU(nn.Module):
         x = self.inv_avg(x)
         x = self.up(x)
         for i in range(len(self.inv_resid2048)):
-            x = self.inv_resid2048[i](x) + self.inv_mod2048[i](x)*self.inv_mod2048[i](self.down.x2048_skip)
+            x = self.inv_resid2048[i](x) + self.inv_mod2048[i](x)#*self.inv_mod2048[i](self.down.x2048_skip)
 
         x = self.up(x)
         for i in range(len(self.inv_resid1024)):
-            x = self.inv_resid1024[i](x) + self.inv_mod1024[i](x)*self.inv_mod1024[i](self.down.x1024_skip)
+            x = self.inv_resid1024[i](x) + self.inv_mod1024[i](x)#*self.inv_mod1024[i](self.down.x1024_skip)
         
         x = self.up(x)
         for i in range(len(self.inv_resid512)):
-            x = self.inv_resid512[i](x) + self.inv_mod512[i](x)*self.inv_mod512[i](self.down.x512_skip)
+            x = self.inv_resid512[i](x) + self.inv_mod512[i](x)#*self.inv_mod512[i](self.down.x512_skip)
         
         x = self.up(x)
         for i in range(len(self.inv_resid256)):
