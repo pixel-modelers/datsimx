@@ -7,25 +7,31 @@ from dxtbx.model import ExperimentList
 import numpy as np
 
 
-
-def make_nexus(folder, run, total_deg=180, swap=True):
+def make_nexus(folder, run, total_deg=180):
     """
     folder is a datsimx.sim output folder, 
     and run is an integer run number (args.run argument to sim_laue_basic)
     Finds all files shot_{run}_#####.h5 in {folder} and combines them into a master nexus file
     """
-    glob_s = os.path.join(folder, f"shot_{run}_*.h5")
+    glob_s = os.path.join(folder, f"shots_{run}_*.h5")
 
     fnames = glob.glob(glob_s)
+    shot_names = []
+    for f in fnames:
+        shots = h5py.File(f, 'r')['sim_image'].keys()
+        for s in shots:
+            shot_names.append((f, s))
 
-    def get_num(f):
-        return int(f.split("_")[-1].split(".")[0])
-    fnames = sorted(fnames, key=get_num)
-    delta_phi = total_deg/len(fnames)
+    nshot = len(shot_names)
 
-    img_nums = [get_num(f) for f in fnames]
+    def get_num(x):
+        fname, shot_name = x
+        return int(shot_name.split("_")[-1])
 
-    phi = np.arange(len(fnames))*delta_phi 
+    shot_names = sorted(shot_names, key=get_num)
+    delta_phi = total_deg/nshot
+
+    phi = np.arange(nshot)*delta_phi
 
     geom_file = os.path.join(folder, f"geom_run{run}.expt")
     El = ExperimentList.from_file(geom_file, False)
@@ -35,19 +41,40 @@ def make_nexus(folder, run, total_deg=180, swap=True):
     wavelen = El[0].beam.get_wavelength()
     dist_mm = Detector[0].get_distance()
     img_shape = ydim, xdim
-    nimg = len(fnames)
 
     dt = h5py.special_dtype(vlen=str)
     master_file = os.path.join(folder, f"run_{run}_master.h5")
 
     h = h5py.File(master_file, 'w')
-    data_layout = h5py.VirtualLayout(shape=(len(fnames),) + img_shape, dtype=np.float32)
-    for i_f, f in enumerate(fnames):
+    data_layout = h5py.VirtualLayout(shape=(nshot,) + img_shape, dtype=np.float32)
+    for i_f, (f,shot_name) in enumerate(shot_names):
         print(f"Processing file {i_f+1}/{len(fnames)}", end="\r", flush=True)
-        data_source = h5py.VirtualSource(os.path.abspath(f), "noise_image", shape=(1,) + img_shape)
+        data_source = h5py.VirtualSource(os.path.basename(f), f"sim_image/{shot_name}", shape=(1,) + img_shape)
         data_layout[i_f:i_f+1] = data_source
-    print("\n")
 
+    dummie = h5py.File(fnames[0], 'r')
+    if "wave_data" in dummie:
+        wave_layout = h5py.VirtualLayout(shape=(nshot,) + img_shape, dtype=np.float32)
+        h_layout = h5py.VirtualLayout(shape=(nshot,) + img_shape, dtype=np.float32)
+        k_layout = h5py.VirtualLayout(shape=(nshot,) + img_shape, dtype=np.float32)
+        l_layout = h5py.VirtualLayout(shape=(nshot,) + img_shape, dtype=np.float32)
+        for i_f, (f, sn) in enumerate(shot_names):
+            print(f"Processing file {i_f+1}/{nshot}", end="\r", flush=True)
+            wave_source = h5py.VirtualSource(os.path.basename(f), f"wave_data/{sn}", shape=(1,) + img_shape)
+            h_source = h5py.VirtualSource(os.path.basename(f), f"h_data/{sn}", shape=(1,) + img_shape)
+            k_source = h5py.VirtualSource(os.path.basename(f), f"k_data/{sn}", shape=(1,) + img_shape)
+            l_source = h5py.VirtualSource(os.path.basename(f), f"l_data/{sn}", shape=(1,) + img_shape)
+            wave_layout[i_f:i_f+1] = wave_source
+            h_layout[i_f:i_f+1] = h_source
+            k_layout[i_f:i_f+1] = k_source
+            l_layout[i_f:i_f+1] = l_source
+        # add wave h,k,l meta data
+        h.create_virtual_dataset("wave_data", wave_layout)
+        h.create_virtual_dataset("h_data", h_layout)
+        h.create_virtual_dataset("k_data", k_layout)
+        h.create_virtual_dataset("l_data", l_layout)
+
+    print("\n")
 
     entry = h.create_group("entry")
     entry.attrs["NX_class"] = "NXentry"
@@ -80,6 +107,8 @@ def make_nexus(folder, run, total_deg=180, swap=True):
     samp.create_dataset('depends_on', data="phi".encode("utf-8"), dtype=dt)
     samp.create_dataset('name', data="goniometer".encode("utf-8"), dtype=dt)
     # Detector
+    det.create_dataset("saturation_value", data=1e10)
+    det.create_dataset("underload_value", data=0)
     thick_dset = det.create_dataset("sensor_thickness", data=0.00032)
     thick_dset.attrs["units"] = "m"
     det.create_dataset("sensor_material", data="Si", dtype=dt)
@@ -102,7 +131,6 @@ def make_nexus(folder, run, total_deg=180, swap=True):
     beamy_dset = det.create_dataset("beam_center_y", data=beam_y)
     beamx_dset.attrs["units"] = "pixels"
     beamy_dset.attrs["units"] = "pixels"
-
 
     dist_dset = det.create_dataset("detector_distance", data=dist_mm/1000)
     dist_dset.attrs["units"] = "m"
@@ -131,12 +159,14 @@ def make_nexus(folder, run, total_deg=180, swap=True):
         fast.attrs[k] = val_x
         slow.attrs[k] = val_y
     eiger.create_dataset("data_origin", data=[0,0])
+    #eiger.create_dataset("data_size", data=[int(xdim), int(ydim)])
     eiger.create_dataset("data_size", data=[int(ydim), int(xdim)])
+    
     h.close()
     print(f"Wrote file {master_file}.")
 
 
-if __name__=="__main__":
+if __name__ == "__main__":
     folder = sys.argv[1]
     run = int(sys.argv[2])
     total_deg = float(sys.argv[3])
