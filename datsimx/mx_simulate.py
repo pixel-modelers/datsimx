@@ -92,6 +92,13 @@ python mx_simulate.py my_output_directory_split --numimg 180 --splitPhiStart 45 
         help="Solvent B-factor (b_sol) for structure factor calculation. Default is 120.",
     )
     sim_params_group.add_argument(
+        "--bfactor",
+        default=None,
+        type=float,
+        help="Override all atom B-factors with this value (Angstrom^2). "
+             "Useful when PDBs have zeroed or inconsistent B-factors (e.g. from OpenMM).",
+    )
+    sim_params_group.add_argument(
         "--waterThick",
         type=float,
         default=2.5,
@@ -181,9 +188,14 @@ python mx_simulate.py my_output_directory_split --numimg 180 --splitPhiStart 45 
         help="Calculate the wavelength-per-pixel and write to the output files. The output nexus master file then contain additional information at the root level, wave_data, h_data, k_data, l_data for wavelength, and fractional miller indices, per pixel.",
     )
     det_output_group.add_argument(
-        "--eigerMask",
+        "--panelMask",
         action="store_true",
-        help="if True, simulate onto an Eiger panel geometry. Pixels in gaps between Eiger panels will be set to -1.",
+        help="if True, apply a detector panel gap mask. Pixels in gaps between panels will be set to -1. Uses eiger_mask.hdf5 for Eiger (default) or pilatus_mask.hdf5 for Pilatus (when --pilatus is set).",
+    )
+    det_output_group.add_argument(
+        "--pilatus",
+        action="store_true",
+        help="Use a Pilatus 6M detector geometry (2463x2527, 0.172 mm pixels) instead of the default Eiger.",
     )
     det_output_group.add_argument(
         "--noNoise",
@@ -205,6 +217,15 @@ wget https://raw.githubusercontent.com/dermen/e080_laue/master/from_vukica.lam""
         default=None,
         type=str,
         help="Path to a PDB file for structure factor simulation. The structure factors will be calculated from this PDB unless --mtzFile is provided.",
+    )
+    input_gpu_group.add_argument(
+        "--pdbFiles",
+        default=None,
+        type=str,
+        help="Multi-conformation weighted Fcalc. Comma-separated PDB:weight pairs. "
+             "Example: '4bs7.pdb:0.5,perturbed.pdb:0.5'. "
+             "Weights are normalized to sum to 1. Equal weights assumed if omitted "
+             "(e.g. '4bs7.pdb,perturbed.pdb'). Overrides --pdbFile.",
     )
     input_gpu_group.add_argument(
         "--mtzFile",
@@ -341,20 +362,36 @@ wget https://raw.githubusercontent.com/dermen/e080_laue/master/from_vukica.lam""
             o.write(cmd+"\n")
     COMM.barrier()
 
-    # Eiger model
-    DETECTOR = DetectorFactory.simple(
-        sensor='PAD',
-        distance=args.dist,  # mm
-        beam_centre=(155.5875, 163.6125),  # mm
-        fast_direction='+x',
-        slow_direction='-y',
-        pixel_size=(.075, .075),  # mm
-        image_size=(4148, 4362))
-    MASK = np.ones((4362, 4148)).astype(bool)
-    if args.eigerMask:
-        mask_file = os.path.join(this_dir, "eiger_mask.hdf5")
-        MASK = h5py.File(mask_file, "r")["mask"][()]
-        assert MASK.shape==(4362, 4148)
+    if args.pilatus:
+        # Pilatus 6M model
+        DETECTOR = DetectorFactory.simple(
+            sensor='PAD',
+            distance=args.dist,  # mm
+            beam_centre=(211.836, 217.322),  # mm (center of 2463x2527 at 0.172 mm pixels)
+            fast_direction='+x',
+            slow_direction='-y',
+            pixel_size=(.172, .172),  # mm
+            image_size=(2463, 2527))
+        MASK = np.ones((2527, 2463)).astype(bool)
+        if args.panelMask:
+            mask_file = os.path.join(this_dir, "pilatus_mask.hdf5")
+            MASK = h5py.File(mask_file, "r")["mask"][()]
+            assert MASK.shape == (2527, 2463)
+    else:
+        # Eiger model
+        DETECTOR = DetectorFactory.simple(
+            sensor='PAD',
+            distance=args.dist,  # mm
+            beam_centre=(155.5875, 163.6125),  # mm
+            fast_direction='+x',
+            slow_direction='-y',
+            pixel_size=(.075, .075),  # mm
+            image_size=(4148, 4362))
+        MASK = np.ones((4362, 4148)).astype(bool)
+        if args.panelMask:
+            mask_file = os.path.join(this_dir, "eiger_mask.hdf5")
+            MASK = h5py.File(mask_file, "r")["mask"][()]
+            assert MASK.shape == (4362, 4148)
 
     if args.specFile is not None:
         spec_file = args.specFile
@@ -380,12 +417,57 @@ wget https://raw.githubusercontent.com/dermen/e080_laue/master/from_vukica.lam""
 
     BEAM = BeamFactory.simple(ave_wave)
 
-    print(f"fcalcs from {pdb_file}")
     fcalc_wave = None if args.useSpreadData else ave_wave
     no_anom_for_atoms = None
     if args.useSpreadData:
         no_anom_for_atoms = {"Fe"}
-    Fcalc = fcalc.get_complex_fcalc_from_pdb(pdb_file, wavelength=ave_wave, k_sol=args.ksol, b_sol=args.bsol, no_anom_for_atoms=no_anom_for_atoms)
+
+    # --- Compute Fcalc (single or multi-PDB weighted combination) ---
+    if args.pdbFiles is not None:
+        # Parse "pdb1:w1,pdb2:w2,..." or "pdb1,pdb2,..." (equal weights)
+        pdb_weight_pairs = []
+        for spec in args.pdbFiles.split(","):
+            spec = spec.strip()
+            if ":" in spec:
+                path, w = spec.rsplit(":", 1)
+                pdb_weight_pairs.append((path, float(w)))
+            else:
+                pdb_weight_pairs.append((spec, 1.0))
+        # Normalize weights
+        total_w = sum(w for _, w in pdb_weight_pairs)
+        pdb_weight_pairs = [(p, w / total_w) for p, w in pdb_weight_pairs]
+
+        if COMM.rank == 0:
+            print("Multi-PDB weighted Fcalc:")
+            for p, w in pdb_weight_pairs:
+                print("  %.1f%%  %s" % (100 * w, p))
+
+        # Compute complex Fcalc for each PDB, combine as weighted sum
+        F_combined = None
+        for pdb_path, weight in pdb_weight_pairs:
+            F = fcalc.get_complex_fcalc_from_pdb(
+                pdb_path, wavelength=ave_wave,
+                k_sol=args.ksol, b_sol=args.bsol,
+                b_factor=args.bfactor,
+                no_anom_for_atoms=no_anom_for_atoms)
+            if F_combined is None:
+                F_combined = F.array(data=weight * F.data())
+            else:
+                if len(F.data()) != len(F_combined.data()):
+                    raise ValueError(
+                        "HKL set mismatch: %s has %d reflections vs %d. "
+                        "PDBs must share unit cell and spacegroup."
+                        % (pdb_path, len(F.data()), len(F_combined.data())))
+                F_combined = F_combined.array(
+                    data=F_combined.data() + weight * F.data())
+        Fcalc = F_combined
+    else:
+        print("fcalcs from %s" % pdb_file)
+        Fcalc = fcalc.get_complex_fcalc_from_pdb(
+            pdb_file, wavelength=ave_wave,
+            k_sol=args.ksol, b_sol=args.bsol,
+            b_factor=args.bfactor,
+            no_anom_for_atoms=no_anom_for_atoms)
 
     spread_data = None
     if (args.nitro or args.rubre) and args.useSpreadData:

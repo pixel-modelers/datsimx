@@ -9,19 +9,23 @@ def get_complex_fcalc_from_pdb(
         dmin=1,
         dmax=None,
         fft=True,
+        b_factor=None,
         k_sol=0.435, b_sol=46, show_pdb_summary=False, no_anom_for_atoms=None):
     """
     produce a structure factor from PDB coords, see mmtbx/programs/fmodel.py for formulation
     k_sol, b_sol form the solvent component of the Fcalc: Fprotein + k_sol*exp(-b_sol*s^2/4) (I think)
+    b_factor: if not None, override all atom B-factors with this value (Angstrom^2)
     """
+    import numpy as np
     pdb_in = iotbx.pdb.input(pdb_file)
     xray_structure = pdb_in.xray_structure_simple()
     if show_pdb_summary:
         xray_structure.show_summary()
     xray_structure.convert_to_isotropic()
     for sc in xray_structure.scatterers():
-        #if sc.element_symbol() == "Fe":
-        #    sc.occupancy = 1
+        if b_factor is not None:
+            sc.u_iso = b_factor / (8 * np.pi * np.pi)
+            sc.occupancy = 1
         if wavelength is not None:
             if no_anom_for_atoms is not None and sc.element_symbol() in no_anom_for_atoms:
                 continue
