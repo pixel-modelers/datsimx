@@ -78,6 +78,8 @@ Does not support: multi-PDB (pdbFiles), crystal splitting, waveImg, spread data.
         help="Apply detector panel gap mask.")
     det_group.add_argument("--noNoise", action="store_true",
         help="Skip noise; save background separately.")
+    det_group.add_argument("--writeMtz", action="store_true",
+        help="Write ground truth Fcalc as MTZ to outdir/ground_truth.mtz.")
 
     # Input Data and GPU
     input_group = parser.add_argument_group("Input Data and GPU")
@@ -98,24 +100,24 @@ Does not support: multi-PDB (pdbFiles), crystal splitting, waveImg, spread data.
 
     # Jitter Parameters
     jitt_group = parser.add_argument_group("Per-shot Jitter Parameters",
-        "Each jitter draws from a normal distribution with mean=0 and the given sigma. "
-        "Set to 0 (default) to disable.")
+        "All jitter values are in PERCENT of the base value (except jitterRot which "
+        "is in degrees). Set to 0 (default) to disable.")
     jitt_group.add_argument("--jitterUcell", type=float, default=0,
-        help="Sigma in Angstroms for unit cell edge length jitter. "
-             "Only free parameters are jittered, respecting crystal symmetry: "
-             "tetragonal/hexagonal jitter a(=b) and c independently; "
-             "orthorhombic jitters a,b,c independently; "
-             "monoclinic jitters a,b,c,beta; triclinic jitters all 6.")
+        help="Percent jitter for unit cell edge lengths (e.g. 0.1 = 0.1%% of a,b,c). "
+             "Respects crystal symmetry: tetragonal/hexagonal jitter a(=b) and c "
+             "independently; orthorhombic jitters a,b,c independently; etc.")
     jitt_group.add_argument("--jitterUcellAngle", type=float, default=0,
-        help="Sigma in degrees for unit cell angle jitter (monoclinic beta, or triclinic alpha/beta/gamma).")
+        help="Percent jitter for unit cell angles (monoclinic beta, or triclinic "
+             "alpha/beta/gamma). E.g. 0.5 = 0.5%% of base angle.")
     jitt_group.add_argument("--jitterRot", type=float, default=0,
-        help="Sigma in degrees for orientation jitter (random rotation).")
+        help="Sigma in degrees for orientation jitter (absolute, not percent).")
     jitt_group.add_argument("--jitterMosSpread", type=float, default=0,
-        help="Sigma in degrees for mosaic spread FWHM jitter.")
+        help="Percent jitter for mosaic spread FWHM (e.g. 10 = 10%% of base mosSpread).")
     jitt_group.add_argument("--jitterScale", type=float, default=0,
-        help="Fractional sigma for intensity scale jitter (e.g. 0.1 = 10%% variation).")
+        help="Percent jitter for intensity scale (e.g. 10 = 10%% variation around 1.0).")
     jitt_group.add_argument("--jitterBfactor", type=float, default=0,
-        help="Sigma in Angstrom^2 for per-shot B-factor perturbation applied to Fcalc.")
+        help="Sigma in Angstrom^2 for per-shot B-factor perturbation (absolute, not "
+             "percent, since base B-factor can be zero).")
     jitt_group.add_argument("--jitterDist", type=str, default="normal",
         choices=["normal", "uniform"],
         help="Distribution for jitter draws. 'normal': Gaussian with given sigma. "
@@ -352,45 +354,46 @@ Does not support: multi-PDB (pdbFiles), crystal splitting, waveImg, spread data.
                 R_jitt = sqr(Rotation.from_rotvec(rotvec).as_matrix().ravel())
                 Uphi = R_jitt * Uphi
 
-            # --- Jitter unit cell (symmetry-aware) ---
+            # --- Jitter unit cell (symmetry-aware, percent of base values) ---
             crystal_shot = CRYSTAL
             # params order: (a, b, c, alpha, beta, gamma)
-            ucell_shot_params = list(ucell_base.parameters())
+            p = list(ucell_base.parameters())  # base values
+            ucell_shot_params = list(p)
             if args.jitterUcell > 0 or args.jitterUcellAngle > 0:
-                sU = args.jitterUcell
-                sA = args.jitterUcellAngle
+                pctU = args.jitterUcell / 100.0
+                pctA = args.jitterUcellAngle / 100.0
                 if crystal_system == "cubic":
-                    da = jdraw(rng, sU) if sU else 0
+                    da = jdraw(rng, p[0] * pctU) if pctU else 0
                     ucell_shot_params[0] += da
                     ucell_shot_params[1] += da  # b=a
                     ucell_shot_params[2] += da  # c=a
                 elif crystal_system in ("tetragonal", "hexagonal", "trigonal"):
-                    da = jdraw(rng, sU) if sU else 0
-                    dc = jdraw(rng, sU) if sU else 0
+                    da = jdraw(rng, p[0] * pctU) if pctU else 0
+                    dc = jdraw(rng, p[2] * pctU) if pctU else 0
                     ucell_shot_params[0] += da
                     ucell_shot_params[1] += da  # b=a
                     ucell_shot_params[2] += dc
                 elif crystal_system == "orthorhombic":
-                    if sU:
-                        ucell_shot_params[0] += jdraw(rng, sU)
-                        ucell_shot_params[1] += jdraw(rng, sU)
-                        ucell_shot_params[2] += jdraw(rng, sU)
+                    if pctU:
+                        ucell_shot_params[0] += jdraw(rng, p[0] * pctU)
+                        ucell_shot_params[1] += jdraw(rng, p[1] * pctU)
+                        ucell_shot_params[2] += jdraw(rng, p[2] * pctU)
                 elif crystal_system == "monoclinic":
-                    if sU:
-                        ucell_shot_params[0] += jdraw(rng, sU)
-                        ucell_shot_params[1] += jdraw(rng, sU)
-                        ucell_shot_params[2] += jdraw(rng, sU)
-                    if sA:
-                        ucell_shot_params[4] += jdraw(rng, sA)  # beta
+                    if pctU:
+                        ucell_shot_params[0] += jdraw(rng, p[0] * pctU)
+                        ucell_shot_params[1] += jdraw(rng, p[1] * pctU)
+                        ucell_shot_params[2] += jdraw(rng, p[2] * pctU)
+                    if pctA:
+                        ucell_shot_params[4] += jdraw(rng, p[4] * pctA)  # beta
                 else:  # triclinic
-                    if sU:
-                        ucell_shot_params[0] += jdraw(rng, sU)
-                        ucell_shot_params[1] += jdraw(rng, sU)
-                        ucell_shot_params[2] += jdraw(rng, sU)
-                    if sA:
-                        ucell_shot_params[3] += jdraw(rng, sA)  # alpha
-                        ucell_shot_params[4] += jdraw(rng, sA)  # beta
-                        ucell_shot_params[5] += jdraw(rng, sA)  # gamma
+                    if pctU:
+                        ucell_shot_params[0] += jdraw(rng, p[0] * pctU)
+                        ucell_shot_params[1] += jdraw(rng, p[1] * pctU)
+                        ucell_shot_params[2] += jdraw(rng, p[2] * pctU)
+                    if pctA:
+                        ucell_shot_params[3] += jdraw(rng, p[3] * pctA)  # alpha
+                        ucell_shot_params[4] += jdraw(rng, p[4] * pctA)  # beta
+                        ucell_shot_params[5] += jdraw(rng, p[5] * pctA)  # gamma
 
                 new_ucell = unit_cell(ucell_shot_params)
                 Br = new_ucell.orthogonalization_matrix()
@@ -400,10 +403,11 @@ Does not support: multi-PDB (pdbFiles), crystal splitting, waveImg, spread data.
                 crystal_shot = Crystal(a_j, b_j, c_j, sg)
             crystal_shot.set_U(Uphi)
 
-            # --- Jitter mosaic spread ---
+            # --- Jitter mosaic spread (percent of base) ---
             mos_shot = args.mosSpread
             if args.jitterMosSpread > 0:
-                mos_shot = max(0.001, args.mosSpread + jdraw(rng, args.jitterMosSpread))
+                sigma_mos = args.mosSpread * args.jitterMosSpread / 100.0
+                mos_shot = max(0.001, args.mosSpread + jdraw(rng, sigma_mos))
 
             # --- Jitter B-factor (modify Fcalc amplitudes) ---
             Fcalc_shot = Fcalc
@@ -440,7 +444,7 @@ Does not support: multi-PDB (pdbFiles), crystal splitting, waveImg, spread data.
             # --- Jitter scale ---
             scale_factor = 1.0
             if args.jitterScale > 0:
-                scale_factor = max(0.01, 1 + jdraw(rng, args.jitterScale))
+                scale_factor = max(0.01, 1 + jdraw(rng, args.jitterScale / 100.0))
                 img = img * scale_factor
 
             # --- Add background + noise ---
@@ -509,6 +513,14 @@ Does not support: multi-PDB (pdbFiles), crystal splitting, waveImg, spread data.
         geom_file = os.path.join(args.outdir, f"geom_run{args.run}.expt")
         El.as_file(geom_file)
         make_nexus.make_nexus(args.outdir, args.run, total_deg=args.totalDeg)
+
+        if args.writeMtz:
+            mtz_path = os.path.join(args.outdir, "ground_truth.mtz")
+            Fcalc_out = Fcalc
+            if not Fcalc_out.is_xray_amplitude_array():
+                Fcalc_out = Fcalc_out.as_amplitude_array()
+            Fcalc_out.as_mtz_dataset(column_root_label='F').mtz_object().write(mtz_path)
+            print(f"Wrote ground truth MTZ -> {mtz_path}")
 
 
 if __name__ == "__main__":

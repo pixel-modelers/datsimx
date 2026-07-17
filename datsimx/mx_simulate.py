@@ -202,6 +202,11 @@ python mx_simulate.py my_output_directory_split --numimg 180 --splitPhiStart 45 
         action="store_true",
         help="If set, a single background file will be stored separately and no noise will be added to the output images. This significantly reduces file size but requires the user to manually add noise and background for a full simulation."
     )
+    det_output_group.add_argument(
+        "--writeMtz",
+        action="store_true",
+        help="Write the ground truth structure factors as ground_truth.mtz in the output directory."
+    )
 
     # Input Data and GPU Group
     input_gpu_group = parser.add_argument_group("Input Data and GPU Configuration")
@@ -714,7 +719,15 @@ wget https://raw.githubusercontent.com/dermen/e080_laue/master/from_vukica.lam""
         geom_file = os.path.join(args.outdir, f"geom_run{args.run}.expt")
         El.as_file(geom_file)
         make_nexus.make_nexus(args.outdir, args.run, total_deg=args.totalDeg)
-        
+
+        if args.writeMtz:
+            mtz_path = os.path.join(args.outdir, "ground_truth.mtz")
+            Fcalc_out = Fcalc
+            if not Fcalc_out.is_xray_amplitude_array():
+                Fcalc_out = Fcalc_out.as_amplitude_array()
+            Fcalc_out.as_mtz_dataset(column_root_label='F').mtz_object().write(mtz_path)
+            print(f"Wrote ground truth MTZ -> {mtz_path}")
+
 
 if __name__=="__main__":
     main()
