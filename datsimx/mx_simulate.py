@@ -67,6 +67,12 @@ python mx_simulate.py my_output_directory_split --numimg 180 --splitPhiStart 45 
         help="Crystal size in mm. If not specified, Nabc will be used to determine crystal size.",
     )
     sim_params_group.add_argument(
+        "--fluxScale",
+        type=float,
+        default=1,
+        help="Scale the default flux of 5e9  by this amount (default=1)",
+    )
+    sim_params_group.add_argument(
         "--Nabc",
         default=[30,30,30],
         nargs=3,
@@ -355,7 +361,7 @@ wget https://raw.githubusercontent.com/dermen/e080_laue/master/from_vukica.lam""
         assert os.path.exists(pdb_file)
         print(f"Will use rubre file {pdb_file}")
     air_name = os.path.join(this_dir, 'air.stol')
-    total_flux=5e9
+    total_flux=5e9 *args.fluxScale
     beam_size_mm=0.01
 
     if COMM.rank==0:

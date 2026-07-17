@@ -19,5 +19,5 @@ datsimx = ["*.stol", "*.pdb", "*.lam"]
 
 [project.scripts]
 "datsimx.sim" = "datsimx.mx_simulate:main"
-"datsimx.sim_jitt" = "datsimx.mx_simulate_jitt:main"
+"datsimx.jittsim" = "datsimx.mx_simulate_jitt:main"
 

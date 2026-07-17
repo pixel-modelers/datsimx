@@ -44,6 +44,12 @@ Does not support: multi-PDB (pdbFiles), crystal splitting, waveImg, spread data.
     sim_group.add_argument("--waterThick", type=float, default=2.5,
         help="Water thickness in mm for background.")
     sim_group.add_argument("--verbose", action="store_true")
+    sim_group.add_argument(
+        "--fluxScale",
+        type=float,
+        default=1,
+        help="Scale the default flux of 5e9  by this amount (default=1)",
+    )
 
     # Rotation and Image Control
     rot_group = parser.add_argument_group("Rotation and Image Control")
@@ -179,7 +185,7 @@ Does not support: multi-PDB (pdbFiles), crystal splitting, waveImg, spread data.
     if args.pdbFile is not None:
         pdb_file = args.pdbFile
     air_name = os.path.join(this_dir, 'air.stol')
-    total_flux = 5e9
+    total_flux = 5e9 * args.fluxScale
     beam_size_mm = 0.01
 
     if COMM.rank == 0:
