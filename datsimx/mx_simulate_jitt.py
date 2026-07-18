@@ -115,6 +115,9 @@ Does not support: multi-PDB (pdbFiles), crystal splitting, waveImg, spread data.
         help="Percent jitter for mosaic spread FWHM (e.g. 10 = 10%% of base mosSpread).")
     jitt_group.add_argument("--jitterScale", type=float, default=0,
         help="Percent jitter for intensity scale (e.g. 10 = 10%% variation around 1.0).")
+    jitt_group.add_argument("--jitterNabc", type=float, default=0,
+        help="Percent jitter for mosaic domain size Nabc (e.g. 10 = 10%% of base Na,Nb,Nc). "
+             "Each axis jittered independently. Values clamped to >= 1.")
     jitt_group.add_argument("--jitterBfactor", type=float, default=0,
         help="Sigma in Angstrom^2 for per-shot B-factor perturbation (absolute, not "
              "percent, since base B-factor can be zero).")
@@ -154,7 +157,8 @@ Does not support: multi-PDB (pdbFiles), crystal splitting, waveImg, spread data.
         os.environ["DIFFBRAGG_USE_CUDA"] = "1"
 
     has_jitter = any([args.jitterUcell, args.jitterUcellAngle, args.jitterRot,
-                      args.jitterMosSpread, args.jitterScale, args.jitterBfactor])
+                      args.jitterMosSpread, args.jitterScale, args.jitterBfactor,
+                      args.jitterNabc])
 
     # Jitter draw function: normal or uniform with matched variance
     sqrt3 = np.sqrt(3)
@@ -417,13 +421,19 @@ Does not support: multi-PDB (pdbFiles), crystal splitting, waveImg, spread data.
                 corr = flex.exp(-delta_B / 4.0 * d_star_sq_data)
                 Fcalc_shot = Fcalc.customized_copy(data=Fcalc_base_data * corr)
 
+            # --- Jitter Nabc (percent of base) ---
+            Nabc_shot = list(Nabc)
+            if args.jitterNabc > 0:
+                pctN = args.jitterNabc / 100.0
+                Nabc_shot = [max(1, n + jdraw(rng, n * pctN)) for n in Nabc]
+
             # --- Simulate ---
             from simtbx.diffBragg.device import DeviceWrapper
             with DeviceWrapper(device_Id) as _:
                 verbose = args.verbose and COMM.rank == 0
                 img = diffBragg_forward(
                     crystal_shot, DETECTOR, BEAM, Fcalc_shot, energies, fluxes,
-                    oversample=args.oversample, Ncells_abc=Nabc,
+                    oversample=args.oversample, Ncells_abc=Nabc_shot,
                     mos_dom=args.mosDoms, mos_spread=mos_shot, beamsize_mm=beam_size_mm,
                     device_Id=device_Id,
                     show_params=False, crystal_size_mm=args.xtalSize, printout_pix=None,
@@ -490,6 +500,7 @@ Does not support: multi-PDB (pdbFiles), crystal splitting, waveImg, spread data.
             h.create_dataset(f"mos_spread/{shot_name}", data=mos_shot)
             if has_jitter:
                 h.create_dataset(f"jitter/ucell_params/{shot_name}", data=ucell_shot_params)
+                h.create_dataset(f"jitter/Nabc/{shot_name}", data=Nabc_shot)
                 h.create_dataset(f"jitter/scale_factor/{shot_name}", data=scale_factor)
                 h.create_dataset(f"jitter/delta_bfactor/{shot_name}", data=delta_B)
 
