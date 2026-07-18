@@ -21,6 +21,12 @@ Does not support: multi-PDB (pdbFiles), crystal splitting, waveImg, spread data.
         help="Mosaic angular spread FWHM in degrees.")
     sim_group.add_argument("--mosDoms", type=int, default=150,
         help="Number of mosaic domains.")
+    sim_group.add_argument("--blueSausage", action="store_true",
+        help="Enable blue-sausage effect: each shot is composed of 3 slightly "
+             "mis-oriented sub-lattices (sausages), creating a jagged punctate "
+             "mosaic pattern instead of smooth mosaicity.")
+    sim_group.add_argument("--sausageMisori", type=float, default=0.05,
+        help="Sigma of angular mis-orientation between sausages in degrees.")
     sim_group.add_argument("--div", type=float, default=0,
         help="Beam divergence in mrad.")
     sim_group.add_argument("--divSteps", type=int, default=0,
@@ -435,27 +441,83 @@ Does not support: multi-PDB (pdbFiles), crystal splitting, waveImg, spread data.
 
             # --- Simulate ---
             from simtbx.diffBragg.device import DeviceWrapper
-            with DeviceWrapper(device_Id) as _:
-                verbose = args.verbose and COMM.rank == 0
-                img = diffBragg_forward(
-                    crystal_shot, DETECTOR, BEAM, Fcalc_shot, energies, fluxes,
-                    oversample=args.oversample, Ncells_abc=Nabc_shot,
-                    mos_dom=args.mosDoms, mos_spread=mos_shot, beamsize_mm=beam_size_mm,
-                    device_Id=device_Id,
-                    show_params=False, crystal_size_mm=args.xtalSize, printout_pix=None,
-                    verbose=verbose, default_F=0, interpolate=0,
-                    mosaicity_random_seeds=None, div_mrad=args.div,
-                    divsteps=args.divSteps,
-                    spot_scale_override=args.spotScale,
-                    show_timings=verbose,
-                    nopolar=False, diffuse_params=None,
-                    delta_phi=delta_phi * 180 / np.pi if not args.static else None,
-                    num_phi_steps=args.numPhiSteps if not args.static else 1,
-                    perpixel_wavelen=False,
-                    spread_data=None)
 
-            if len(img.shape) == 3:
-                img = img[0]
+            sausage_rotvecs = None
+            sausage_Umats = None
+
+            if args.blueSausage:
+                # Blue-sausage: simulate 3 mis-oriented sub-lattices per shot
+                n_sausages = 3
+                mos_per_sausage = max(1, args.mosDoms // n_sausages)
+                sausage_rotvecs = np.zeros((n_sausages, 3))
+                sausage_Umats = np.zeros((n_sausages, 9))
+                img = np.zeros(img_sh, dtype=np.float64)
+
+                for i_s in range(n_sausages):
+                    # Draw a small random mis-orientation for this sausage
+                    rotvec_s = rng.normal(0, np.deg2rad(args.sausageMisori), size=3)
+                    R_s = sqr(Rotation.from_rotvec(rotvec_s).as_matrix().ravel())
+                    U_s = R_s * Uphi
+                    crystal_shot.set_U(U_s)
+
+                    sausage_rotvecs[i_s] = rotvec_s
+                    sausage_Umats[i_s] = list(U_s)
+
+                    with DeviceWrapper(device_Id) as _:
+                        verbose_s = args.verbose and COMM.rank == 0 and i_s == 0
+                        img_s = diffBragg_forward(
+                            crystal_shot, DETECTOR, BEAM, Fcalc_shot, energies, fluxes,
+                            oversample=args.oversample, Ncells_abc=Nabc_shot,
+                            mos_dom=mos_per_sausage, mos_spread=mos_shot,
+                            beamsize_mm=beam_size_mm,
+                            device_Id=device_Id,
+                            show_params=False, crystal_size_mm=args.xtalSize,
+                            printout_pix=None,
+                            verbose=verbose_s, default_F=0, interpolate=0,
+                            mosaicity_random_seeds=None, div_mrad=args.div,
+                            divsteps=args.divSteps,
+                            spot_scale_override=args.spotScale,
+                            show_timings=verbose_s,
+                            nopolar=False, diffuse_params=None,
+                            delta_phi=delta_phi * 180 / np.pi if not args.static else None,
+                            num_phi_steps=args.numPhiSteps if not args.static else 1,
+                            perpixel_wavelen=False,
+                            spread_data=None)
+                    if len(img_s.shape) == 3:
+                        img_s = img_s[0]
+                    img += img_s
+
+                # Restore base orientation for metadata
+                crystal_shot.set_U(Uphi)
+                if COMM.rank == 0 and i_shot == 0:
+                    print("Blue-sausage: %d sub-lattices, %d mos_doms each, "
+                          "misori sigma=%.4f deg" % (n_sausages, mos_per_sausage,
+                                                      args.sausageMisori))
+
+            else:
+                with DeviceWrapper(device_Id) as _:
+                    verbose = args.verbose and COMM.rank == 0
+                    img = diffBragg_forward(
+                        crystal_shot, DETECTOR, BEAM, Fcalc_shot, energies, fluxes,
+                        oversample=args.oversample, Ncells_abc=Nabc_shot,
+                        mos_dom=args.mosDoms, mos_spread=mos_shot,
+                        beamsize_mm=beam_size_mm,
+                        device_Id=device_Id,
+                        show_params=False, crystal_size_mm=args.xtalSize,
+                        printout_pix=None,
+                        verbose=verbose, default_F=0, interpolate=0,
+                        mosaicity_random_seeds=None, div_mrad=args.div,
+                        divsteps=args.divSteps,
+                        spot_scale_override=args.spotScale,
+                        show_timings=verbose,
+                        nopolar=False, diffuse_params=None,
+                        delta_phi=delta_phi * 180 / np.pi if not args.static else None,
+                        num_phi_steps=args.numPhiSteps if not args.static else 1,
+                        perpixel_wavelen=False,
+                        spread_data=None)
+
+                if len(img.shape) == 3:
+                    img = img[0]
 
             # --- Jitter scale ---
             scale_factor = 1.0
@@ -509,6 +571,11 @@ Does not support: multi-PDB (pdbFiles), crystal splitting, waveImg, spread data.
                 h.create_dataset(f"jitter/Nabc/{shot_name}", data=Nabc_shot)
                 h.create_dataset(f"jitter/scale_factor/{shot_name}", data=scale_factor)
                 h.create_dataset(f"jitter/delta_bfactor/{shot_name}", data=delta_B)
+            if args.blueSausage and sausage_rotvecs is not None:
+                h.create_dataset(f"sausage/rot_vecs_deg/{shot_name}",
+                                 data=np.rad2deg(sausage_rotvecs))
+                h.create_dataset(f"sausage/Umats/{shot_name}",
+                                 data=sausage_Umats)
 
             tsim = time.time() - tsim
             if COMM.rank == 0:
@@ -530,6 +597,45 @@ Does not support: multi-PDB (pdbFiles), crystal splitting, waveImg, spread data.
         geom_file = os.path.join(args.outdir, f"geom_run{args.run}.expt")
         El.as_file(geom_file)
         make_nexus.make_nexus(args.outdir, args.run, total_deg=args.totalDeg)
+
+        if args.blueSausage:
+            import glob
+            glob_s = os.path.join(args.outdir, f"shots_{args.run}_*.h5")
+            rank_files = glob.glob(glob_s)
+            shot_entries = []
+            for rf in rank_files:
+                with h5py.File(rf, 'r') as hf:
+                    if 'sausage' in hf:
+                        for sn in hf['sausage/rot_vecs_deg'].keys():
+                            shot_entries.append((rf, sn))
+            shot_entries.sort(key=lambda x: int(x[1].split("_")[-1]))
+
+            sausage_file = os.path.join(args.outdir, f"sausage_run{args.run}.h5")
+            nshots = len(shot_entries)
+            with h5py.File(sausage_file, 'w') as sf:
+                sf.attrs["description"] = (
+                    "Blue-sausage ground truth: 3 sub-lattice orientations per shot. "
+                    "rot_vecs_deg[i] = (3,3) mis-orientation rotation vectors (degrees) "
+                    "applied to base crystal orientation for shot i. "
+                    "Umats[i] = (3,9) resulting U matrices (flattened 3x3). "
+                    "Umat_base[i] = (9,) base crystal U matrix before sausage perturbation.")
+                sf.attrs["sausageMisori_deg"] = args.sausageMisori
+                sf.attrs["n_sausages"] = 3
+                rotvecs = np.zeros((nshots, 3, 3))
+                umats = np.zeros((nshots, 3, 9))
+                ubase = np.zeros((nshots, 9))
+                for i, (rf, sn) in enumerate(shot_entries):
+                    with h5py.File(rf, 'r') as hf:
+                        rotvecs[i] = hf[f'sausage/rot_vecs_deg/{sn}'][()]
+                        umats[i] = hf[f'sausage/Umats/{sn}'][()]
+                        ubase[i] = hf[f'Umat/{sn}'][()]
+                sf.create_dataset("rot_vecs_deg", data=rotvecs,
+                                  compression="gzip", compression_opts=4)
+                sf.create_dataset("Umats", data=umats,
+                                  compression="gzip", compression_opts=4)
+                sf.create_dataset("Umat_base", data=ubase,
+                                  compression="gzip", compression_opts=4)
+            print(f"Wrote sausage ground truth -> {sausage_file}")
 
         if args.writeMtz:
             mtz_path = os.path.join(args.outdir, "ground_truth.mtz")
