@@ -448,7 +448,7 @@ Does not support: multi-PDB (pdbFiles), crystal splitting, waveImg, spread data.
             if args.blueSausage:
                 # Blue-sausage: simulate 3 mis-oriented sub-lattices per shot
                 n_sausages = 3
-                mos_per_sausage = max(1, args.mosDoms // n_sausages)
+                mos_per_sausage = args.mosDoms #max(1, args.mosDoms // n_sausages)
                 sausage_rotvecs = np.zeros((n_sausages, 3))
                 sausage_Umats = np.zeros((n_sausages, 9))
                 img = np.zeros(img_sh, dtype=np.float64)
