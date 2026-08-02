@@ -130,6 +130,10 @@ Does not support: multi-PDB (pdbFiles), crystal splitting, waveImg, spread data.
     jitt_group.add_argument("--jitterNabc", type=float, default=0,
         help="Percent jitter for mosaic domain size Nabc (e.g. 10 = 10%% of base Na,Nb,Nc). "
              "Each axis jittered independently. Values clamped to >= 1.")
+    jitt_group.add_argument("--jitterNdef", type=float, default=0,
+        help="Sigma in degrees for random rotation of the Nabc tensor off crystal axes. "
+             "A rotation R is drawn and N'=R*diag(Na,Nb,Nc)*Rt is decomposed into "
+             "diagonal Nabc and off-diagonal Ndef terms. Set to 0 to keep Ndef=(0,0,0).")
     jitt_group.add_argument("--jitterBfactor", type=float, default=0,
         help="Sigma in Angstrom^2 for per-shot B-factor perturbation (absolute, not "
              "percent, since base B-factor can be zero).")
@@ -170,7 +174,7 @@ Does not support: multi-PDB (pdbFiles), crystal splitting, waveImg, spread data.
 
     has_jitter = any([args.jitterUcell, args.jitterUcellAngle, args.jitterRot,
                       args.jitterMosSpread, args.jitterScale, args.jitterBfactor,
-                      args.jitterNabc])
+                      args.jitterNabc, args.jitterNdef])
 
     # Jitter draw function: normal or uniform with matched variance
     sqrt3 = np.sqrt(3)
@@ -439,6 +443,19 @@ Does not support: multi-PDB (pdbFiles), crystal splitting, waveImg, spread data.
                 pctN = args.jitterNabc / 100.0
                 Nabc_shot = [max(1, n + jdraw(rng, n * pctN)) for n in Nabc]
 
+            # --- Jitter Ndef: rotate N tensor off crystal axes ---
+            Ndef_shot = [0, 0, 0]
+            if args.jitterNdef > 0:
+                rotvec_n = jdraw(rng, np.deg2rad(args.jitterNdef), size=3)
+                R_n = Rotation.from_rotvec(rotvec_n).as_matrix()
+                N_diag = np.diag(Nabc_shot)
+                N_rot = R_n @ N_diag @ R_n.T  # R * diag(Na,Nb,Nc) * Rt
+                Nabc_shot = [N_rot[0, 0], N_rot[1, 1], N_rot[2, 2]]
+                Ndef_shot = [N_rot[0, 1], N_rot[1, 2], N_rot[0, 2]]  # Nd, Ne, Nf
+                if COMM.rank == 0 and i_shot == 0:
+                    print("Ndef jitter: rot=%.2f deg, Nabc=%s, Ndef=%s"
+                          % (args.jitterNdef, Nabc_shot, Ndef_shot))
+
             # --- Simulate ---
             from simtbx.diffBragg.device import DeviceWrapper
 
@@ -468,6 +485,7 @@ Does not support: multi-PDB (pdbFiles), crystal splitting, waveImg, spread data.
                         img_s = diffBragg_forward(
                             crystal_shot, DETECTOR, BEAM, Fcalc_shot, energies, fluxes,
                             oversample=args.oversample, Ncells_abc=Nabc_shot,
+                            Ncells_def=Ndef_shot,
                             mos_dom=mos_per_sausage, mos_spread=mos_shot,
                             beamsize_mm=beam_size_mm,
                             device_Id=device_Id,
@@ -500,6 +518,7 @@ Does not support: multi-PDB (pdbFiles), crystal splitting, waveImg, spread data.
                     img = diffBragg_forward(
                         crystal_shot, DETECTOR, BEAM, Fcalc_shot, energies, fluxes,
                         oversample=args.oversample, Ncells_abc=Nabc_shot,
+                        Ncells_def=Ndef_shot,
                         mos_dom=args.mosDoms, mos_spread=mos_shot,
                         beamsize_mm=beam_size_mm,
                         device_Id=device_Id,
@@ -569,6 +588,7 @@ Does not support: multi-PDB (pdbFiles), crystal splitting, waveImg, spread data.
             if has_jitter:
                 h.create_dataset(f"jitter/ucell_params/{shot_name}", data=ucell_shot_params)
                 h.create_dataset(f"jitter/Nabc/{shot_name}", data=Nabc_shot)
+                h.create_dataset(f"jitter/Ndef/{shot_name}", data=Ndef_shot)
                 h.create_dataset(f"jitter/scale_factor/{shot_name}", data=scale_factor)
                 h.create_dataset(f"jitter/delta_bfactor/{shot_name}", data=delta_B)
             if args.blueSausage and sausage_rotvecs is not None:
